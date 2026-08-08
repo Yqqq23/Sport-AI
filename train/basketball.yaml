@@ -1,0 +1,25 @@
+# Basketball Detection Dataset - Ultralytics YOLO format
+#
+# Extended from SRC_B/basketball.yaml (which defined 3 classes: player/ball/rim).
+# Class 3 "jersey" is NEW: it is the REGION on the player where the number is
+# printed, used to crop tight inputs for OCR.
+#
+# The number TEXT (0-99) is deliberately NOT a detection class. Making 100
+# classes out of digits would need per-number training data and would still not
+# generalise to unseen numbers; the text is read by OCR from the jersey crop and
+# stabilised across frames by src/jersey.py.
+#
+# Paths are relative to this file's directory (Ultralytics resolves `path` as
+# the dataset root). Override on the command line if your data lives elsewhere.
+
+path: datasets/basketball
+train: images/train
+val: images/val
+
+nc: 4
+
+names:
+  0: player
+  1: ball
+  2: rim
+  3: jersey

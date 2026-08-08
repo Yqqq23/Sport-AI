@@ -1,0 +1,44 @@
+# --- Model weights -------------------------------------------------------
+# Never commit weights. They are large, and the only ones available locally are
+# generic COCO checkpoints that this project does not use. Self-trained weights
+# are produced on the GPU server and stay there.
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+
+# --- Datasets ------------------------------------------------------------
+datasets/
+train/datasets/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# --- Run outputs ---------------------------------------------------------
+outputs/
+runs/
+*.log
+
+# --- Secrets -------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Editors / OS --------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

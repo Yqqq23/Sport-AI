@@ -1,0 +1,12 @@
+# Normalize to LF in the repository. This project is edited on Windows but runs
+# on a Linux GPU server; CRLF must never reach the server.
+* text=auto eol=lf
+
+# Binary-ish assets that must never be line-ending converted.
+*.pt binary
+*.pth binary
+*.onnx binary
+*.engine binary
+*.jpg binary
+*.png binary
+*.mp4 binary
