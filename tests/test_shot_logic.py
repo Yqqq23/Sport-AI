@@ -164,10 +164,32 @@ for f in range(21):
 tid4, _, _ = pt4.find_shooter(basket_frame_idx=20)
 check("no shooter", tid4, None)
 
-print("possession requires proximity")
-pt5 = PossessionTracker(ShotConfig(possession_max_distance=10.0), fps=30.0)
+print("possession requires proximity, measured in box heights")
+# Box is 140px tall; ratio 0.1 allows only 14px of slack.
+pt5 = PossessionTracker(ShotConfig(possession_max_distance_ratio=0.1), fps=30.0)
 holder = pt5.update(0, 0.0, (500.0, 500.0), [make_player_box(7, (60.0, 60.0, 140.0, 200.0))])
 check("far player is not the holder", holder, None)
+
+print("possession is scale-invariant: same real distance, different depths")
+# Near player: 300px-tall box, ball 60px away  -> 0.20 box heights.
+# Far player:  100px-tall box, ball 20px away  -> 0.20 box heights.
+# Both are the same relative distance, so both must qualify under ratio 0.4,
+# which an absolute pixel threshold could not achieve simultaneously.
+near_box = make_player_box(1, (100.0, 100.0, 200.0, 400.0))   # height 300
+far_box = make_player_box(2, (900.0, 100.0, 940.0, 200.0))    # height 100
+pt6 = PossessionTracker(ShotConfig(possession_max_distance_ratio=0.4), fps=30.0)
+check("near player qualifies", pt6.update(0, 0.0, (260.0, 250.0), [near_box]), 1)
+pt7 = PossessionTracker(ShotConfig(possession_max_distance_ratio=0.4), fps=30.0)
+check("far player qualifies too", pt7.update(0, 0.0, (960.0, 150.0), [far_box]), 2)
+
+print("possession picks the scale-normalised nearest, not the raw-pixel nearest")
+# Ball is 30px from the far player (0.30 box heights) and 50px from the near
+# player (0.17 box heights). Raw pixels would pick the far player; normalised
+# distance correctly picks the near one.
+contested_near = make_player_box(1, (400.0, 100.0, 500.0, 400.0))  # height 300
+contested_far = make_player_box(2, (580.0, 100.0, 620.0, 200.0))   # height 100
+pt8 = PossessionTracker(ShotConfig(possession_max_distance_ratio=0.4), fps=30.0)
+check("normalised winner", pt8.update(0, 0.0, (550.0, 150.0), [contested_near, contested_far]), 1)
 
 # ------------------------------------------------------------- integration
 print("ShotAnalyzer end to end: make is attributed to the shooter")

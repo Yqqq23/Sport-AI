@@ -83,9 +83,20 @@ class ShotConfig:
     rim_smoothing_frames: int = 15
 
     # --- possession / shooter attribution --------------------------------
-    #: Max distance from ball centre to a player box (pixels, 0 = inside box)
-    #: for that player to count as holding the ball.
-    possession_max_distance: float = 80.0
+    #: Max ball-to-player distance for possession, as a FRACTION OF THAT
+    #: PLAYER'S BOX HEIGHT (0.0 means the ball centre is inside the box).
+    #:
+    #: Changed from an absolute pixel threshold on review. With a fixed camera
+    #: the same physical distance spans wildly different pixel counts: a player
+    #: at the near baseline may be a 300px-tall box while one at the far
+    #: baseline is 100px, so one absolute pixel threshold means three different
+    #: things depending on where a player stands. Box height is a usable proxy
+    #: for depth here because players are roughly the same real-world height,
+    #: which makes this ratio approximately scale-invariant.
+    #:
+    #: UNCALIBRATED first guess. 0.4 is roughly "within 40% of a player's
+    #: height", which at a 200px box reproduces the old 80px behaviour.
+    possession_max_distance_ratio: float = 0.4
     #: A player must hold possession for at least this many consecutive frames
     #: before they can be credited as the shooter. Filters out the ball merely
     #: passing near a defender.
@@ -352,9 +363,15 @@ class _PlayerBox:
 class PossessionTracker:
     """Records who holds the ball each frame, then answers "who shot it?".
 
-    Possession rule: the player whose box is nearest the ball centre, provided
-    that distance is within ``possession_max_distance``. Ties are broken by
-    smaller distance only.
+    Possession rule: distances are measured in units of the candidate player's
+    own box height, and the player with the smallest SCALE-NORMALISED distance
+    wins, provided it is within ``possession_max_distance_ratio``.
+
+    Normalising by box height (rather than comparing raw pixels) matters
+    because a near player's box may be three times the height of a far
+    player's. Under a raw-pixel rule a near player would win possession
+    disputes purely for being near the camera, and one absolute threshold could
+    not be correct at both ends of the court simultaneously.
 
     KNOWN FAILURE MODES:
 
@@ -394,14 +411,15 @@ class PossessionTracker:
         holder: Optional[_PlayerBox] = None
 
         if ball_center is not None and players:
-            best = min(
-                players,
-                key=lambda p: point_to_bbox_distance(ball_center, p.bbox_xyxy),
-            )
-            if (
-                point_to_bbox_distance(ball_center, best.bbox_xyxy)
-                <= self.config.possession_max_distance
-            ):
+
+            def normalized_distance(player: _PlayerBox) -> float:
+                """Ball-to-box distance expressed in that player's box heights."""
+                _, y1, _, y2 = player.bbox_xyxy
+                box_height = max(1.0, y2 - y1)
+                return point_to_bbox_distance(ball_center, player.bbox_xyxy) / box_height
+
+            best = min(players, key=normalized_distance)
+            if normalized_distance(best) <= self.config.possession_max_distance_ratio:
                 holder = best
 
         self.history.append(
