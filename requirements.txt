@@ -1,0 +1,37 @@
+# basketball-v2 requirements
+#
+# INSTALL TORCH FIRST, SEPARATELY. It is deliberately not pinned here because
+# the correct build depends on the CUDA version of the GPU server. Installing
+# it from PyPI via this file can silently pull a CPU-only or mismatched-CUDA
+# wheel. See README.md "Install" for the exact command.
+#
+#   # example only - pick the index URL that matches your server's CUDA
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# Then:
+#   pip install -r requirements.txt
+
+# --- Detection and tracking ----------------------------------------------
+# >= 8.4.63 is REQUIRED, not merely preferred: ocsort, deepocsort, fasttrack
+# and tracktrack were added in that release. Older versions ship only botsort
+# and bytetrack and will raise on any other tracker_type.
+# tracktrack.yaml is this project's default backend, so an older ultralytics
+# cannot run the default config at all.
+ultralytics>=8.4.63
+
+# --- Core numerics and video ---------------------------------------------
+numpy>=1.24
+opencv-python>=4.8
+
+# --- Config -------------------------------------------------------------
+# Already a hard dependency of ultralytics; pinned explicitly because
+# src/config.py and src/track.py import it directly.
+PyYAML>=6.0
+
+# --- Jersey number OCR ---------------------------------------------------
+# Python binding only. The tesseract BINARY is a system package and is NOT
+# installed by pip:
+#   Debian/Ubuntu:  sudo apt-get install -y tesseract-ocr
+#   RHEL/CentOS:    sudo yum install -y tesseract
+# scripts/check_env.py verifies the binary is actually reachable.
+pytesseract>=0.3.10
