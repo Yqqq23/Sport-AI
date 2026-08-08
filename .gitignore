@@ -21,10 +21,20 @@ outputs/
 runs/
 *.log
 
+# --- Annotation tool runtime state ---------------------------------------
+# tools/annotation writes uploaded videos, extracted frames and exported
+# datasets under tools/annotation/data/, and its SQLite DB next to the backend.
+# Both are per-machine working state, not source.
+tools/annotation/data/
+tools/annotation/frontend/node_modules/
+*.db
+*.sqlite3
+
 # --- Secrets -------------------------------------------------------------
 .env
 .env.*
 !.env.example
+!.env.server.example
 
 # --- Python --------------------------------------------------------------
 __pycache__/

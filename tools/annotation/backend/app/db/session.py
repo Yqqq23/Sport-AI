@@ -1,0 +1,48 @@
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
+from app.core.config import settings
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+engine = create_engine(settings.database_url, connect_args=connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def ensure_sqlite_schema() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(video_frames)"))}
+        if existing:
+            if "image_width" not in existing:
+                conn.execute(text("ALTER TABLE video_frames ADD COLUMN image_width INTEGER"))
+            if "image_height" not in existing:
+                conn.execute(text("ALTER TABLE video_frames ADD COLUMN image_height INTEGER"))
+
+        annotation_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(manual_annotations)"))}
+        if annotation_columns and "deleted_at" not in annotation_columns:
+            conn.execute(text("ALTER TABLE manual_annotations ADD COLUMN deleted_at DATETIME"))
+
+        dataset_version_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(dataset_versions)"))}
+        if dataset_version_columns:
+            missing_columns = {
+                "temporal_block_size": "INTEGER NOT NULL DEFAULT 30",
+                "strict_split": "INTEGER NOT NULL DEFAULT 0",
+                "source_data_fingerprint": "VARCHAR(64) NOT NULL DEFAULT ''",
+            }
+            for column_name, column_type in missing_columns.items():
+                if column_name not in dataset_version_columns:
+                    conn.execute(text(f"ALTER TABLE dataset_versions ADD COLUMN {column_name} {column_type}"))
