@@ -86,12 +86,13 @@ jersey come back empty. That is expected.
 
 ## 2. Dataset layout
 
-Ultralytics YOLO format. `train/basketball.yaml` points at `datasets/basketball`
-relative to itself:
+Ultralytics YOLO format. The dataset lives at the **repository root**, not
+inside `train/`:
 
 ```
-train/
-  basketball.yaml
+basketball-v2/
+  train/
+    basketball.yaml          <- path: datasets/basketball
   datasets/
     basketball/
       images/
@@ -101,6 +102,16 @@ train/
         train/   frame_0001.txt  frame_0002.txt  ...
         val/     frame_9001.txt  ...
 ```
+
+> **Run training from the repository root.** Ultralytics resolves a relative
+> `path:` against the **current working directory**, not against the YAML file
+> (`ultralytics/data/utils.py`: `if not path.exists() and not path.is_absolute():
+> path = (DATASETS_DIR / path).resolve()`). Launch from anywhere else and it
+> silently falls back to `~/datasets/datasets/basketball` and reports the
+> dataset as missing.
+>
+> If you must keep the data elsewhere, put an **absolute** path in
+> `train/basketball.yaml`, which skips the fallback entirely.
 
 Each `labels/*.txt` has one line per object, coordinates **normalised 0-1**,
 `class_id cx cy w h`:
