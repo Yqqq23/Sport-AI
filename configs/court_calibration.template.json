@@ -1,0 +1,51 @@
+{
+  "meta": {
+    "description": "Half-court calibration template for the 500x940 PORTRAIT top-down canvas. Copy this file to court_calibration.json, then replace every image_points value with the clicked [x, y] pixel location in a frame from your video. Leave court_points untouched.",
+    "topdown_template_size": [500, 940],
+    "usage": [
+      "1. cp configs/court_calibration.template.json configs/court_calibration.json",
+      "2. grab one frame from the video (any frame; the camera is fixed)",
+      "3. click each named landmark and write its pixel [x, y] into image_points",
+      "4. at least 4 points are required; more points and a wider spread give a better fit",
+      "5. delete any landmark you cannot see in frame from BOTH image_points and court_points"
+    ],
+    "warning": "The -1 placeholders below are not valid calibration. load_court_calibration will happily accept them and produce a meaningless homography, so every point you keep must be replaced with a real click.",
+    "court_points_note": "court_points are pixel coordinates on the 500x940 portrait canvas and are derived from FIBA 3x3 half-court geometry. Do not edit them unless you also change canvas/render.court in configs/default.yaml."
+  },
+  "image_points": {
+    "corner_tl": [-1.0, -1.0],
+    "corner_tr": [-1.0, -1.0],
+    "corner_br": [-1.0, -1.0],
+    "corner_bl": [-1.0, -1.0],
+    "paint_tl": [-1.0, -1.0],
+    "paint_tr": [-1.0, -1.0],
+    "paint_br": [-1.0, -1.0],
+    "paint_bl": [-1.0, -1.0],
+    "free_throw_center": [-1.0, -1.0],
+    "hoop_center": [-1.0, -1.0],
+    "backboard_left": [-1.0, -1.0],
+    "backboard_right": [-1.0, -1.0],
+    "three_left_base": [-1.0, -1.0],
+    "three_right_base": [-1.0, -1.0],
+    "three_left_break": [-1.0, -1.0],
+    "three_right_break": [-1.0, -1.0]
+  },
+  "court_points": {
+    "corner_tl": [32.0, 32.0],
+    "corner_tr": [468.0, 32.0],
+    "corner_br": [468.0, 908.0],
+    "corner_bl": [32.0, 908.0],
+    "paint_tl": [159.0, 540.0],
+    "paint_tr": [341.0, 540.0],
+    "paint_br": [341.0, 908.0],
+    "paint_bl": [159.0, 908.0],
+    "free_throw_center": [250.0, 540.0],
+    "hoop_center": [250.0, 838.0],
+    "backboard_left": [206.0, 803.0],
+    "backboard_right": [294.0, 803.0],
+    "three_left_base": [71.0, 908.0],
+    "three_right_base": [429.0, 908.0],
+    "three_left_break": [71.0, 633.0],
+    "three_right_break": [429.0, 633.0]
+  }
+}

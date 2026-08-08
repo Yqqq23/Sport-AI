@@ -1,0 +1,234 @@
+# =========================================================================
+# basketball-v2 default configuration
+#
+# All paths are resolved RELATIVE TO THIS FILE, so nothing here is machine
+# specific and the same file works on Windows and on the Linux GPU server.
+#
+# LAYOUT: everything in PART 1 is either a structural choice or a value
+# recovered from tuned source code. Everything in PART 2 is an uncalibrated
+# guess. If you only have time to tune a few numbers, tune PART 2 items 1-5.
+# =========================================================================
+
+# =========================================================================
+# PART 1 - structural settings and recovered values
+# =========================================================================
+
+# --- Detection -----------------------------------------------------------
+detector:
+  # REQUIRED. No default is provided on purpose: a wrong-but-present weights
+  # path would silently produce meaningless detections. Point this at the
+  # best.pt produced by train/train.py.
+  weights: ../train/runs/detect/train/basketball_baseline/weights/best.pt
+  conf: 0.25
+  iou: 0.45
+  # Must match the training imgsz. Ball and rim are small objects and lose
+  # badly at 640; train/train.py also defaults to 960.
+  imgsz: 960
+  device: "0"           # "0" | "0,1" | "cpu"
+  half: false
+  max_det: 60
+  # Set true to hard-fail when the weights are not the basketball 4-class
+  # model. Left false so smoke_test.py / compare_trackers.py can deliberately
+  # run official COCO weights before any training has happened.
+  require_basketball_classes: false
+
+# --- Tracking ------------------------------------------------------------
+tracker:
+  # Selectable backends (all bundled with ultralytics >= 8.4.63):
+  #   botsort.yaml     default general-purpose tracker, motion + optional appearance
+  #   bytetrack.yaml   lightweight strong baseline, first choice at high frame rates
+  #   ocsort.yaml      observation-centric SORT variant, more robust motion association
+  #   deepocsort.yaml  OC-SORT + ReID appearance fusion + camera motion compensation
+  #   fasttrack.yaml   occlusion-aware ByteTrack variant with Kalman rollback
+  #   tracktrack.yaml  CVPR 2025, multi-cue iterative association + Track-Aware
+  #                    Initialization; best under dense occlusion, but the heaviest
+  # A path also works, e.g. trackers/bytetrack_sportcv.yaml (tuned, track_buffer 40).
+  tracker: tracktrack.yaml
+
+  # ReID only takes effect on backends that actually declare a with_reid key
+  # (verified: botsort does, bytetrack does not). On a backend without it the
+  # run warns loudly and proceeds WITHOUT ReID rather than silently ignoring
+  # this flag.
+  # UNPROVEN FOR BASKETBALL: team-mates wear near-identical kits, so appearance
+  # embeddings may barely separate them. Treat as an experiment, not a fix.
+  with_reid: false
+  reid_model: auto      # "auto" reuses detector features; cheapest option
+
+  persist: true         # required for cross-frame id continuity - do not disable
+  conf: 0.25
+  iou: 0.45
+  imgsz: 960
+  device: "0"
+  half: false
+  max_det: 60
+
+  # false = one forward pass, tracker sees every class and non-player classes
+  #         are filtered out afterwards (faster; the default)
+  # true  = tracker sees only players, ball/rim/jersey come from a SECOND
+  #         forward pass (cleaner isolation, roughly double the inference cost)
+  # Run scripts/compare_trackers.py before changing this: it reports whether
+  # non-player classes are polluting track ids near the rim.
+  restrict_tracker_to_players: false
+
+  generated_tracker_dir: ../outputs/.generated_trackers
+
+  # Ball is tracked by nearest-neighbour, not by the MOT backend.
+  # UNCALIBRATED, but low risk - see PART 2 notes.
+  ball_max_distance: 120.0
+  ball_max_lost_frames: 15
+
+# --- Court calibration ---------------------------------------------------
+# Homography is solved ONCE outside the frame loop; the 0619 footage is a fixed
+# PlaySight camera, so per-frame re-estimation would only add cost and jitter.
+calibration_json: court_calibration.json
+
+# Top-down canvas that court_points are expressed in.
+# PORTRAIT 500x940 on purpose: the calibration JSON's court_points span x<=468,
+# y<=908. The homography is fitted to those points, so the drawn court must use
+# the same coordinate space. Changing this to landscape REQUIRES re-clicking the
+# calibration points; changing the numbers alone will silently misplace players.
+canvas:
+  width: 500
+  height: 940
+  margin: 32
+
+# --- Outputs -------------------------------------------------------------
+output:
+  output_dir: ../outputs/run
+  annotated_video_name: annotated.mp4     # output 1
+  topdown_video_name: topdown.mp4         # output 2
+  shots_stem: shots                       # output 3 -> shots.csv + shots.json
+  write_annotated: true
+  write_topdown: true
+  fourcc: mp4v          # mp4v works in stock OpenCV; avc1 usually needs a custom build
+
+max_frames: null        # null = whole video; set an int for quick tests
+
+
+# =========================================================================
+# PART 2
+# === UNCALIBRATED: 需在真实视频上标定 ===
+#
+# Every value in this part is a FIRST GUESS, not a tuned value. None were
+# recovered from working source code. They are ordered by how much damage a
+# wrong value does, worst first. Calibrate 1-5 before trusting shot output.
+#
+# See "Parameter calibration guide" in README.md for what to watch, which
+# direction to move each value, and what overshooting looks like.
+#
+# The three blocks below (shot, jersey, render) are grouped here IN FULL so
+# there is exactly one place to look. A handful of fields inside them are
+# recovered rather than guessed; those are marked RECOVERED individually.
+# =========================================================================
+
+shot:
+  # ---------------------------------------------------------------- 1 ----
+  # PRIORITY 1. Ball-to-player distance for possession, as a FRACTION OF THAT
+  # PLAYER'S BOX HEIGHT. Directly decides whether shots are credited to the
+  # right player. 0.4 reproduces the old 80px behaviour at a 200px-tall box.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  possession_max_distance_ratio: 0.4
+
+  # ---------------------------------------------------------------- 2 ----
+  # PRIORITY 2. How far below the rim (in rim-box heights) the ball must fall
+  # to confirm a make. THE MAIN FALSE-POSITIVE DIAL: trades "ball grazed the
+  # rim and bounced away, counted as a make" against "real make missed".
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  rim_below_margin: 0.5
+
+  # ---------------------------------------------------------------- 3 ----
+  # PRIORITY 3. Minimum descent in pixels per frame required while crossing the
+  # rim. This is what rejects a ball travelling UPWARD through the rim plane.
+  # Scales with frame rate and ball speed; at 30fps a real descent is far above
+  # 1.0, so this default is probably too permissive.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  min_downward_velocity: 1.0
+
+  # ---------------------------------------------------------------- 4 ----
+  # PRIORITY 4. Consecutive frames a player must hold the ball to be creditable
+  # as the shooter. Too low: jitter during a contested rebound misattributes.
+  # Too high: a quick catch-and-shoot yields no attribution at all.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  min_possession_frames: 5
+
+  # ---------------------------------------------------------------- 5 ----
+  # PRIORITY 5. Horizontal tolerance for "inside the rim span", as a fraction
+  # of rim width. Depends on how tightly rim boxes were annotated; keep this
+  # consistent with the training data.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  rim_horizontal_margin: 0.15
+
+  # --- lower sensitivity, still uncalibrated -----------------------------
+  # How far above the rim the ball must be seen to arm the sequence, in rim-box
+  # heights. Stops a ball resting on the rim from arming it.
+  rim_above_margin: 0.5
+  # Max frames from the ABOVE observation to the BELOW confirmation. 45 = 1.5s
+  # at 30fps. Note this effectively guards the INSIDE stage: a ball merely
+  # hovering above the rim re-arms, because hovering then dropping in IS a make.
+  max_frames_above_to_below: 45
+  # Frames to suppress further baskets after one fires, so floor bounces cannot
+  # re-trigger the same make.
+  cooldown_frames: 45
+  # Rolling-median window for the rim box. Single-frame rim detections jitter
+  # by several pixels and every margin above is measured against this box.
+  rim_smoothing_frames: 15
+  # Seconds of history kept for both the crossing state machine and the
+  # possession lookback. Must exceed the longest plausible release-to-swish time.
+  buffer_seconds: 2.0
+  # How far back to search for the shooter after a basket.
+  # Must be <= buffer_seconds * fps or the history is already gone.
+  shooter_lookback_frames: 60
+
+jersey:
+  enabled: true
+  # RECOVERED from the salvaged pipeline (--number_interval, default 5).
+  ocr_interval: 5
+  backend: pytesseract
+  tesseract_cmd: null   # null = find on PATH
+
+  stabilizer:
+    # These three were read as args.* by the salvaged source but NEVER declared
+    # in its argparse block (verified: no add_argument, no setattr, no
+    # set_defaults). The original therefore raised AttributeError before it
+    # could ever lock a number, so no tuned value for them survives anywhere.
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    number_vote_window: 15
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    slot_lock_min_votes: 3
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    slot_reassign_patience: 8
+
+    # RECOVERED, verbatim from the source. Do not retune casually.
+    min_observation_confidence: 0.55   # source line 1590
+    strong_vote_confidence: 0.85       # source line 1595
+
+  gate:
+    # NEW in this project; the salvaged pipeline ran OCR on every matched box
+    # regardless of size or blur, which is the main source of junk votes.
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    min_box_width: 24
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    min_box_height: 32
+    # 0.0 disables the sharpness test (it costs one Laplacian per crop).
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    min_laplacian_variance: 0.0
+
+render:
+  line_width: 2
+  # EMA smoothing for top-down trails. The source read this from an argparse
+  # value that is not present in the salvaged range, so it could not be recovered.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  trail_alpha: 0.5
+  court:
+    # Structural. Keep width/height identical to `canvas` above or projected
+    # points land in a different space than the drawn court; config.validate()
+    # checks this and refuses to run on a mismatch.
+    width: 500
+    height: 940
+    margin: 32
+    court_width_m: 15.0
+    court_height_m: 11.0
+    line_thickness: 2
+    player_radius: 7
+    trail_thickness: 2
+    trail_length: 30    # RECOVERED from 0619/render.py:47
