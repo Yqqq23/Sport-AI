@@ -27,9 +27,11 @@ detector:
   device: "0"           # "0" | "0,1" | "cpu"
   half: false
   max_det: 60
-  # Set true to hard-fail when the weights are not the basketball 4-class
+  # Set true to hard-fail when the weights are not the basketball 5-class
   # model. Left false so smoke_test.py / compare_trackers.py can deliberately
   # run official COCO weights before any training has happened.
+  # The check is all-or-nothing: OLDER 4-CLASS WEIGHTS (no referee) FAIL IT.
+  # That is deliberate - see src/detect.py:_check_class_scheme.
   require_basketball_classes: false
 
 # --- Tracking ------------------------------------------------------------

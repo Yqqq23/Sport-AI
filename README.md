@@ -8,7 +8,7 @@ Near-real-time 2D basketball analysis. One video in, three artifacts out:
 | 2 | `topdown.mp4` | Calibrated top-down court, each player a dot with a motion trail |
 | 3 | `shots.csv` + `shots.json` | Per-player made-shot records: jersey number, timestamp, court position |
 
-Detection is Ultralytics YOLO26 with self-trained 4-class weights. Tracking uses
+Detection is Ultralytics YOLO26 with self-trained 5-class weights. Tracking uses
 Ultralytics native tracking with a **configurable** backend. No Roboflow cloud
 API, no SAM2, no pose estimation.
 
@@ -121,9 +121,12 @@ Each `labels/*.txt` has one line per object, coordinates **normalised 0-1**,
 1 0.5121 0.3007 0.0180 0.0320     <- ball
 2 0.4990 0.2455 0.0710 0.0290     <- rim
 3 0.4830 0.5820 0.0300 0.0400     <- jersey (number region on the player)
+4 0.1120 0.6640 0.0480 0.1900     <- referee
 ```
 
-Classes are fixed:
+`train/basketball.yaml` is the **source of truth** for the class scheme.
+`src/detect.py` mirrors it as constants, and the annotation tool checks its own
+generated `data.yaml` against it field by field before exporting.
 
 | id | name | meaning |
 |---|---|---|
@@ -131,13 +134,29 @@ Classes are fixed:
 | 1 | `ball` | the basketball |
 | 2 | `rim` | the hoop |
 | 3 | `jersey` | the region of the shirt carrying the number |
+| 4 | `referee` | detected **only so it can be excluded** — see below |
+
+New classes are **appended, never inserted**. Indices 0-3 are baked into every
+label file already annotated and into the role split in `src/track.py`, so
+re-ordering would silently relabel existing data with no error anywhere.
+
+**`referee` feeds nothing downstream, and that is the point.** It is not
+tracked, never owns a jersey number, and never reaches output 3 —
+`src/track.py` drops it during the role split. It exists because without a label
+for "person who is not a player" the detector has nowhere to put a referee and
+learns to file them under `player`, which puts a non-player on the top-down
+court, into the possession contest, and potentially credited with a basket.
+Detecting them is *how* they get excluded.
 
 **The number text (0-99) is not a detection class.** Turning digits into 100
 classes would need per-number training data and still would not generalise to an
 unseen number. Instead the `jersey` box is cropped, read by OCR, and voted
-across frames by `src/jersey.py`.
+across frames by `src/jersey.py`. The annotation tool stores the number as a
+side-channel file (`jersey_numbers.json`), never as a YOLO label.
 
-Annotation notes that matter later:
+Full labelling rules for all five classes, including how to draw each box and
+how much of each to collect, are in **`docs/annotation_guide.md`**. The two that
+bite hardest:
 
 - Annotate `rim` **tightly and consistently**. Every made-shot margin is measured
   in units of the rim box, so a loose rim box silently widens all of them.
@@ -177,6 +196,7 @@ player          0.9210      0.7050
 ball            0.5120      0.2980      <- watch this one
 rim             0.8830      0.6120
 jersey          0.6490      0.4370
+referee         0.7100      0.4800
 ```
 
 Classes with no validation labels are listed separately, so an untrained class
@@ -513,7 +533,7 @@ basketball-v2/
     smoke_test.py        end-to-end check, no trained weights needed
     compare_trackers.py  backend benchmark and rim-contamination report
   train/
-    basketball.yaml   4-class dataset definition
+    basketball.yaml   5-class dataset definition (source of truth)
     train.py          train / val with per-class mAP
   tests/
     test_jersey_logic.py   voting and locking, no torch/cv2 required

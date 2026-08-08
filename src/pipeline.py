@@ -173,6 +173,12 @@ def run_pipeline(
             )
             if run_ocr_this_frame:
                 for jersey_box in tracked.jerseys:
+                    # Jersey ownership is resolved against tracked.players ONLY.
+                    # Referees (CLASS_REFEREE) are already absent from that list
+                    # by the role split in src/track.py, so a jersey box drawn on
+                    # a referee can never acquire an owner and never votes. That
+                    # is intended: referee numbers are not player numbers, and
+                    # letting one bind would corrupt a real player's vote pool.
                     owner = _nearest_player(jersey_box, tracked.players)
                     if owner is None or owner.track_id is None:
                         continue
@@ -295,7 +301,12 @@ def run_pipeline(
 
 
 def _nearest_player(jersey_box, players):
-    """Attach a jersey box to the player box that contains or is nearest its centre."""
+    """Attach a jersey box to the player box that contains or is nearest its centre.
+
+    ``players`` never contains referees: src/track.py drops CLASS_REFEREE during
+    the role split. Jersey numbers therefore bind to players only, by
+    construction rather than by a check here.
+    """
     if not players:
         return None
     cx, cy = jersey_box.center_xy

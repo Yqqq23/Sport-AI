@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Optional, Sequence
 
-from detect import CLASS_BALL, CLASS_JERSEY, CLASS_PLAYER, CLASS_RIM
+from detect import CLASS_BALL, CLASS_JERSEY, CLASS_PLAYER, CLASS_REFEREE, CLASS_RIM
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -98,7 +98,14 @@ class TrackedObject:
 
 @dataclass
 class FrameTracks:
-    """Everything tracked/detected in one frame, already split by role."""
+    """Everything tracked/detected in one frame, already split by role.
+
+    There is deliberately NO ``referees`` field. CLASS_REFEREE exists so the
+    detector can tell a referee apart from a player; once that separation has
+    happened the referee has served its entire purpose and is dropped. Adding a
+    field here would invite a downstream consumer, which is precisely what the
+    class is designed to avoid. See Tracker.update and docs/annotation_guide.md.
+    """
 
     frame_idx: int
     timestamp_sec: float
@@ -447,11 +454,29 @@ class Tracker:
         """Track one frame and return roles already split out."""
         if self.config.restrict_tracker_to_players:
             tracked = self._track_call(frame, classes=[CLASS_PLAYER])
-            others = self._predict_call(frame, classes=[CLASS_BALL, CLASS_RIM, CLASS_JERSEY])
+            # CLASS_REFEREE is DETECTED here but never TRACKED. It is included in
+            # this second pass purely so referees remain visible for verification:
+            # a class whose output nobody can see is a class nobody can tell is
+            # working, and "the detector is quietly calling referees players" is
+            # invisible unless referee boxes are actually produced. It costs one
+            # extra class in a pass that is already running.
+            others = self._predict_call(
+                frame, classes=[CLASS_BALL, CLASS_RIM, CLASS_JERSEY, CLASS_REFEREE]
+            )
             objects = tracked + others
         else:
             objects = self._track_call(frame, classes=None)
 
+        # Role split by exact class id. CLASS_REFEREE (4) matches none of these
+        # four branches, so referees are DROPPED HERE BY DESIGN and never reach
+        # tracking, jersey OCR, possession, shot attribution or any output.
+        #
+        # That exclusion IS the class's job - it is not an oversight and not a
+        # TODO. The detector needs a label for "person who is not a player";
+        # without one it files referees under `player`, which puts a non-player
+        # on the top-down court, into the possession contest, and potentially
+        # credited with a basket. Do not add a `referees = [...]` line here
+        # expecting a downstream consumer; there is none, on purpose.
         players = [o for o in objects if o.class_id == CLASS_PLAYER]
         rims = [o for o in objects if o.class_id == CLASS_RIM]
         jerseys = [o for o in objects if o.class_id == CLASS_JERSEY]

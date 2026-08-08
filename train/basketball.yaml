@@ -1,13 +1,33 @@
 # Basketball Detection Dataset - Ultralytics YOLO format
 #
-# Extended from SRC_B/basketball.yaml (which defined 3 classes: player/ball/rim).
-# Class 3 "jersey" is NEW: it is the REGION on the player where the number is
-# printed, used to crop tight inputs for OCR.
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR THE CLASS SCHEME.
+# Two places must be kept byte-identical to the `names` block below:
+#   - src/detect.py            BASKETBALL_CLASS_NAMES (the runtime constants)
+#   - tools/annotation/...     the annotation tool's YOLO export
+# The annotation tool compares its generated data.yaml against this file field
+# by field and REFUSES TO EXPORT on any mismatch, rather than shipping a dataset
+# whose indices disagree with the code that will consume it.
+#
+# EXTENSION RULE: new classes are APPENDED, never inserted or re-ordered.
+# Index 0-3 are baked into every label file already annotated and into the role
+# split in src/track.py. Re-ordering would silently relabel existing data with
+# no error anywhere - the training run would simply learn the wrong thing.
+#
+# History:
+#   0-2  player/ball/rim   from SRC_B/basketball.yaml
+#   3    jersey            NEW: the REGION on the player carrying the number,
+#                          used to crop tight inputs for OCR
+#   4    referee           NEW: detected ONLY so referees can be EXCLUDED.
+#                          Feeds nothing downstream - not tracked, never owns a
+#                          jersey number, never reaches output 3. Without this
+#                          label the detector has no category for a person who
+#                          is not a player, and referees leak into class 0.
 #
 # The number TEXT (0-99) is deliberately NOT a detection class. Making 100
 # classes out of digits would need per-number training data and would still not
 # generalise to unseen numbers; the text is read by OCR from the jersey crop and
-# stabilised across frames by src/jersey.py.
+# stabilised across frames by src/jersey.py. The annotation tool records it as a
+# side-channel file (jersey_numbers.json), not as a YOLO label.
 #
 # Paths are relative to this file's directory (Ultralytics resolves `path` as
 # the dataset root). Override on the command line if your data lives elsewhere.
@@ -16,10 +36,11 @@ path: datasets/basketball
 train: images/train
 val: images/val
 
-nc: 4
+nc: 5
 
 names:
   0: player
   1: ball
   2: rim
   3: jersey
+  4: referee

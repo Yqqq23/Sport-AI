@@ -12,8 +12,8 @@ That coupling is deliberate and documented there.
 There is NO fallback to a COCO checkpoint. If the configured weights are
 missing the constructor raises. A generic COCO model would silently produce
 "person" boxes under class id 0, which happens to collide with this project's
-"player" id, so a silent fallback would look like it worked while every ball,
-rim and jersey silently vanished.
+"player" id, so a silent fallback would look like it worked while ball, rim,
+jersey and referee silently vanished.
 """
 
 from __future__ import annotations
@@ -31,6 +31,14 @@ LOGGER = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Class scheme - must stay in sync with train/basketball.yaml
+#
+# train/basketball.yaml is the source of truth; this dict is its runtime twin.
+# The annotation tool's YOLO export compares its generated data.yaml against
+# that file and refuses to export on any mismatch.
+#
+# EXTENSION RULE: new classes are APPENDED, never inserted or re-ordered.
+# Indices 0-3 are baked into every label file already annotated and into the
+# role split in src/track.py. Re-ordering would silently relabel existing data.
 # --------------------------------------------------------------------------
 
 CLASS_PLAYER = 0
@@ -38,11 +46,25 @@ CLASS_BALL = 1
 CLASS_RIM = 2
 CLASS_JERSEY = 3
 
+#: Referees are detected ONLY so they can be EXCLUDED.
+#:
+#: This class deliberately feeds NOTHING downstream: referees are dropped by the
+#: role split in src/track.py, never own a jersey number (src/pipeline.py
+#: attaches jersey boxes to players only), and never appear in output 3.
+#:
+#: It is NOT a dead class. Without a label for "person who is not a player" the
+#: detector has nowhere to put a referee and learns to file them under `player`
+#: - which puts a non-player on the top-down court, in the possession contest,
+#: and potentially credited with a basket. Detecting them is how they get
+#: excluded. See docs/annotation_guide.md.
+CLASS_REFEREE = 4
+
 BASKETBALL_CLASS_NAMES: dict[int, str] = {
     CLASS_PLAYER: "player",
     CLASS_BALL: "ball",
     CLASS_RIM: "rim",
     CLASS_JERSEY: "jersey",
+    CLASS_REFEREE: "referee",
 }
 
 
@@ -106,9 +128,15 @@ class DetectorConfig:
     half: bool = False
     max_det: int = 60
     # When True, a weights file whose class names do not match the basketball
-    # 4-class scheme is a hard error instead of a warning. Left False so the
+    # 5-class scheme is a hard error instead of a warning. Left False so the
     # smoke test and tracker comparison can deliberately run official COCO
     # weights before any custom training has happened.
+    #
+    # The check is ALL-OR-NOTHING on purpose: weights trained on the older
+    # 4-class scheme (no referee) fail it. That is correct - they are not
+    # 5-class models. Accepting them via a prefix match would let a 4-class
+    # checkpoint run a 5-class config with referees silently absent, which is
+    # exactly the class of silent degradation this project refuses elsewhere.
     require_basketball_classes: bool = False
 
 
@@ -117,7 +145,7 @@ class DetectorWeightsNotFoundError(FileNotFoundError):
 
 
 class DetectorClassMismatchError(ValueError):
-    """Raised when weights do not expose the basketball 4-class scheme."""
+    """Raised when weights do not expose the basketball 5-class scheme."""
 
 
 # --------------------------------------------------------------------------
@@ -163,19 +191,31 @@ class Detector:
         return {}
 
     def _check_class_scheme(self) -> None:
-        """Compare the checkpoint's classes against the basketball scheme."""
+        """Compare the checkpoint's classes against the basketball scheme.
+
+        STRICT and all-or-nothing: EVERY class in BASKETBALL_CLASS_NAMES must be
+        present at its exact index. A prefix match (accepting weights that only
+        cover 0-3) was considered and rejected - it would let a 4-class
+        checkpoint run a 5-class config with referees silently missing, and
+        "silently missing" is the failure mode this project consistently refuses
+        to allow anywhere else.
+        """
         expected = BASKETBALL_CLASS_NAMES
         actual_lower = {idx: name.lower() for idx, name in self.names.items()}
         matches = all(actual_lower.get(idx) == name for idx, name in expected.items())
 
         if matches:
-            LOGGER.info("Detector loaded with basketball 4-class scheme: %s", self.names)
+            LOGGER.info("Detector loaded with basketball 5-class scheme: %s", self.names)
             return
 
         message = (
-            f"Weights '{self.weights_path.name}' do NOT expose the basketball 4-class "
+            f"Weights '{self.weights_path.name}' do NOT expose the basketball 5-class "
             f"scheme {expected}. Found {len(self.names)} classes: {self.names}\n"
-            "Ball / rim / jersey results will be wrong or empty."
+            "Ball / rim / jersey / referee results will be wrong or empty.\n"
+            "NOTE: weights trained on the older 4-class scheme "
+            "(player/ball/rim/jersey, no referee) fail this check BY DESIGN - "
+            "they are not 5-class models. Retrain against train/basketball.yaml, "
+            "or leave require_basketball_classes false to run them with this warning."
         )
         if self.config.require_basketball_classes:
             raise DetectorClassMismatchError(message)

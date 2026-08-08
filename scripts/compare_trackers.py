@@ -214,7 +214,7 @@ def main() -> int:
           f"{info.fps:.1f}fps  {info.frame_count} frames ({info.duration_sec:.1f}s)")
     print(f"  weights  {args.weights.name}")
     if basketball_model:
-        print("  classes  basketball 4-class model: player/ball/rim/jersey")
+        print("  classes  basketball 5-class model: player/ball/rim/jersey/referee")
     else:
         print("  classes  NOT the basketball model -> tracking the person class only.")
         print("           Identity-stability columns are still valid and comparable;")
@@ -306,7 +306,7 @@ def main() -> int:
     print("-" * 100)
     if not basketball_model:
         print("  UNAVAILABLE with non-basketball weights: there are no rim or ball classes to")
-        print("  contaminate anything. Re-run with the trained 4-class model to get this table.")
+        print("  contaminate anything. Re-run with the trained 5-class model to get this table.")
     else:
         print(
             f"{'backend':<26}{'rim ids':>9}{'rim tracked f':>15}"

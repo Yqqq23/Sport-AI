@@ -90,7 +90,7 @@ def main() -> int:
             )
         )
         print(f"{PASS} loaded {args.weights.name} ({len(detector.names)} classes)")
-        print(f"       basketball 4-class model: {detector.is_basketball_model}")
+        print(f"       basketball 5-class model: {detector.is_basketball_model}")
     except Exception as exc:
         print(f"{FAIL} detector failed: {type(exc).__name__}: {exc}")
         traceback.print_exc()
@@ -251,7 +251,7 @@ def main() -> int:
         print(f"SMOKE TEST FAILED: {failures} problem(s)")
     else:
         print("SMOKE TEST PASSED. The pipeline runs end to end.")
-        print("Next: train the 4-class detector, then run src/pipeline.py.")
+        print("Next: train the 5-class detector, then run src/pipeline.py.")
     print("=" * 66)
     return 1 if failures else 0
 
