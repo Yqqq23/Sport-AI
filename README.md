@@ -538,7 +538,31 @@ basketball-v2/
   tests/
     test_jersey_logic.py   voting and locking, no torch/cv2 required
     test_shot_logic.py     basket geometry and attribution, no torch/cv2 required
+  docs/
+    annotation_guide.md    labelling rules for all five classes - read before labelling
+  tools/
+    annotation/            jersey-active-learning, vendored and extended to 5 classes
 ```
+
+### Building your own dataset
+
+`tools/annotation/` is a vendored copy of the jersey-active-learning tool,
+extended to export this project's 5-class scheme. It reads
+`train/basketball.yaml` directly and **refuses to export** if the `data.yaml` it
+generates disagrees with it, so a class-scheme change cannot silently produce a
+mislabelled dataset.
+
+```bash
+cd tools/annotation/backend
+pip install -r requirements.txt
+python -m uvicorn app.main:app --port 8000      # upload, annotate, export
+```
+
+It splits train/val **by video or by track**, never at random — see
+`docs/annotation_guide.md` for why that distinction decides whether your
+validation mAP means anything. Jersey numbers are exported to a separate
+`jersey_numbers.json` as OCR ground truth, normalised with the very same
+`clean_jersey_number` the pipeline votes with.
 
 Run the logic tests anywhere, including a machine with no GPU and no torch:
 
