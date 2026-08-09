@@ -35,6 +35,32 @@ def ensure_sqlite_schema() -> None:
         annotation_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(manual_annotations)"))}
         if annotation_columns and "deleted_at" not in annotation_columns:
             conn.execute(text("ALTER TABLE manual_annotations ADD COLUMN deleted_at DATETIME"))
+        if annotation_columns and "class_id" not in annotation_columns:
+            # Backfill to the jersey class. Every annotation that existed before
+            # this column was added was a jersey box - the tool could not express
+            # anything else - so this is a faithful backfill, not a guess.
+            from app.services.basketball_classes import DEFAULT_CLASS_ID
+
+            conn.execute(
+                text(
+                    "ALTER TABLE manual_annotations "
+                    f"ADD COLUMN class_id INTEGER NOT NULL DEFAULT {int(DEFAULT_CLASS_ID)}"
+                )
+            )
+
+        prediction_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(jersey_predictions)"))}
+        if prediction_columns and "source" not in prediction_columns:
+            # Existing rows cannot be attributed after the fact, so they are
+            # marked 'unknown' rather than guessed at. The UI treats unknown as
+            # "not verified real" and says so.
+            from app.models.dataset import PREDICTION_SOURCE_UNKNOWN
+
+            conn.execute(
+                text(
+                    "ALTER TABLE jersey_predictions ADD COLUMN source "
+                    f"VARCHAR(32) NOT NULL DEFAULT '{PREDICTION_SOURCE_UNKNOWN}'"
+                )
+            )
 
         dataset_version_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(dataset_versions)"))}
         if dataset_version_columns:

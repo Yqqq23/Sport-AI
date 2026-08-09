@@ -3,8 +3,67 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.services.basketball_classes import (
+    BASKETBALL_CLASS_NAMES,
+    DEFAULT_CLASS_ID,
+    NUMBER_BEARING_CLASS_ID,
+    class_name,
+    normalize_jersey_number,
+    validate_class_id,
+)
+
 
 LABEL_STATUS_VALUES = {"correct", "wrong_bbox", "wrong_number", "unclear"}
+
+
+def _apply_class_and_number_rules(model):
+    """Shared validation for the class id and the jersey-number side channel.
+
+    Two rules, both enforced here so create and update cannot drift apart:
+
+    1. class_id must be one of the basketball-v2 classes.
+    2. Only the jersey class carries a number. Every other class stores NULL.
+       A number typed onto a rim or ball box is rejected rather than quietly
+       dropped, because silently discarding it would make the operator believe
+       ground truth was recorded when none was.
+
+    Jersey numbers are normalized through src/jersey.py's clean_jersey_number,
+    the same function the inference pipeline votes with, so "01" and "1" become
+    one value on both sides of an OCR evaluation.
+    """
+    try:
+        model.class_id = validate_class_id(model.class_id)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
+    raw_number = (model.corrected_number or "").strip()
+
+    if model.class_id != NUMBER_BEARING_CLASS_ID:
+        if raw_number:
+            raise ValueError(
+                f"corrected_number is only meaningful on the "
+                f"'{class_name(NUMBER_BEARING_CLASS_ID)}' class "
+                f"(class_id {NUMBER_BEARING_CLASS_ID}); this box is "
+                f"'{class_name(model.class_id)}' (class_id {model.class_id}). "
+                "Leave the number empty."
+            )
+        model.corrected_number = None
+        return model
+
+    if model.label_status == "unclear":
+        # An unreadable number is a legitimate outcome and must stay recordable:
+        # the box may still be a useful jersey detection even when the digits
+        # cannot be read. It is excluded from export by EXPORTABLE_LABEL_STATUSES.
+        model.corrected_number = normalize_jersey_number(raw_number) if raw_number else None
+        return model
+
+    if not raw_number:
+        raise ValueError(
+            "corrected_number cannot be empty for a jersey box unless "
+            "label_status is 'unclear'"
+        )
+    model.corrected_number = normalize_jersey_number(raw_number)
+    return model
 
 
 class VideoAssetCreate(BaseModel):
@@ -84,6 +143,24 @@ class RecognitionSummaryResponse(BaseModel):
     status: str
 
 
+class SavedBoxRead(BaseModel):
+    """One already-saved box on a review frame.
+
+    A review item used to expose at most one annotation, because the tool could
+    only hold one jersey box per frame. A 5-class dataset needs many boxes of
+    different classes on the same image, so the frame now carries a list.
+    """
+
+    annotation_id: int
+    prediction_id: int
+    class_id: int
+    class_name: str
+    corrected_bbox: list[int]
+    corrected_number: str | None = None
+    label_status: str
+    track_id: int
+
+
 class ReviewItemRead(BaseModel):
     review_id: str
     prediction_id: int | None = None
@@ -98,16 +175,47 @@ class ReviewItemRead(BaseModel):
     jersey_bbox: list[int] | None = None
     predicted_number: str = ""
     confidence: float = 0.0
+    #: True when player_bbox/jersey_bbox/predicted_number came from
+    #: mock_recognition rather than from a real model. Surfaced so a mock box is
+    #: never mistaken for a detection.
+    is_mock_prediction: bool = False
+    prediction_source: str = "manual"
     annotation_id: int | None = None
     corrected_bbox: list[int] | None = None
     corrected_number: str | None = None
     label_status: str | None = None
+    #: EVERY saved box on this frame, whatever its class. This is what the
+    #: annotation UI renders and edits.
+    saved_boxes: list[SavedBoxRead] = Field(default_factory=list)
 
 
 class ReviewItemsResponse(BaseModel):
     total_count: int
     items: list[ReviewItemRead]
     message: str | None = None
+    #: Set when any item on this video carries mock predictions.
+    mock_data_warning: str | None = None
+
+
+class BasketballClassRead(BaseModel):
+    id: int
+    name: str
+
+
+class BasketballClassesResponse(BaseModel):
+    """The class scheme the UI must use, served from train/basketball.yaml.
+
+    The frontend deliberately does not hardcode the class list: if it did, a
+    class appended upstream would leave the UI offering a stale set while the
+    exporter used the new one.
+    """
+
+    class_count: int
+    classes: list[BasketballClassRead]
+    number_bearing_class_id: int
+    number_bearing_class_name: str
+    jersey_number_rule: str
+    source_of_truth: str
 
 
 class FailureFrameRead(JerseyPredictionRead):
@@ -168,15 +276,21 @@ class JobQueuedResponse(BaseModel):
 
 
 class ManualAnnotationCreate(BaseModel):
+    #: Negative values mean "no YOLO prediction behind this box". The server
+    #: reallocates them to a unique id per box so one frame can hold many boxes;
+    #: whatever the client sends in the negative range is only a hint.
     prediction_id: int
     video_id: int
     frame_id: int
     track_id: int
+    #: Index into the basketball-v2 class scheme. Defaults to jersey so existing
+    #: clients that predate the 5-class change keep working unchanged.
+    class_id: int = DEFAULT_CLASS_ID
     image_path: str
     image_url: str
     original_bbox: list[int] = Field(min_length=4, max_length=4)
     corrected_bbox: list[int] = Field(min_length=4, max_length=4)
-    original_number: str
+    original_number: str = ""
     corrected_number: str | None = None
     label_status: str
     image_width: int | None = None
@@ -199,17 +313,9 @@ class ManualAnnotationCreate(BaseModel):
         if self.image_height is not None and y2 > self.image_height:
             raise ValueError("corrected_bbox y2 must stay inside image height")
 
-        cleaned_number = (self.corrected_number or "").strip()
-        if self.label_status == "unclear":
-            self.corrected_number = cleaned_number or None
-        else:
-            if not cleaned_number:
-                raise ValueError("corrected_number cannot be empty unless label_status is 'unclear'")
-            self.corrected_number = cleaned_number
+        self.original_number = (self.original_number or "").strip()
 
-        self.original_number = self.original_number.strip()
-
-        return self
+        return _apply_class_and_number_rules(self)
 
 
 class ManualAnnotationRead(BaseModel):
@@ -218,6 +324,10 @@ class ManualAnnotationRead(BaseModel):
     video_id: int
     frame_id: int
     track_id: int
+    class_id: int
+    #: Resolved server-side so the UI never has to keep its own copy of the
+    #: index-to-name mapping.
+    class_name: str
     image_path: str
     image_url: str
     original_bbox: list[int]
@@ -236,6 +346,10 @@ class ManualAnnotationSaveResponse(BaseModel):
 
 class ManualAnnotationUpdate(BaseModel):
     corrected_bbox: list[int] = Field(min_length=4, max_length=4)
+    #: Reclassifying an existing box is allowed - mislabelling a referee as a
+    #: player is a common correction and forcing a delete-and-redraw would lose
+    #: the box geometry that was already right.
+    class_id: int = DEFAULT_CLASS_ID
     corrected_number: str | None = None
     label_status: str
     image_width: int | None = None
@@ -256,14 +370,7 @@ class ManualAnnotationUpdate(BaseModel):
         if self.image_height is not None and y2 > self.image_height:
             raise ValueError("corrected_bbox y2 must stay inside image height")
 
-        cleaned_number = (self.corrected_number or "").strip()
-        if self.label_status == "unclear":
-            self.corrected_number = cleaned_number or None
-        else:
-            if not cleaned_number:
-                raise ValueError("corrected_number cannot be empty unless label_status is 'unclear'")
-            self.corrected_number = cleaned_number
-        return self
+        return _apply_class_and_number_rules(self)
 
 
 class AnnotationProgressResponse(BaseModel):
@@ -331,6 +438,12 @@ class YoloExportResponse(BaseModel):
     image_count: int
     annotation_count: int
     label_file_count: int
+    class_count: int
+    #: Per-class annotation counts, keyed by class name. Exposed so an empty
+    #: class is visible immediately rather than after a training run.
+    annotation_counts_by_class: dict[str, int] = Field(default_factory=dict)
+    #: Rows written to jersey_numbers.json - the OCR ground-truth side channel.
+    jersey_number_count: int = 0
     skipped_unclear_count: int
     skipped_invalid_bbox_count: int
     skipped_missing_image_count: int
@@ -349,6 +462,9 @@ class YoloExportRead(BaseModel):
     image_count: int
     annotation_count: int
     label_file_count: int
+    class_count: int = 0
+    annotation_counts_by_class: dict[str, int] = Field(default_factory=dict)
+    jersey_number_count: int = 0
     skipped_unclear_count: int
     skipped_invalid_bbox_count: int
     skipped_missing_image_count: int

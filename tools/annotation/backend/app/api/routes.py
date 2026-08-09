@@ -18,12 +18,13 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import SessionLocal, get_db
 from app.models.dataset import DatasetVersion, JerseyPrediction, ManualAnnotation, ProcessingJob, VideoAsset, VideoFrame
-from app.schemas.dataset import AnnotationCandidateRead, AnnotationCandidatesResponse, AnnotationProgressResponse, CocoExportRead, CocoExportResponse, DatasetVersionCreate, DatasetVersionManifestResponse, DatasetVersionRead, DatasetVersionSplitReportResponse, DatasetVersionSummaryRead, ExportDownloadResponse, FailureFrameRead, FailureFramesResponse, InconsistentFrameRead, InconsistentFramesResponse, InternalExportResponse, JerseyPredictionRead, JobQueuedResponse, ManualAnnotationCreate, ManualAnnotationRead, ManualAnnotationSaveResponse, ManualAnnotationUpdate, MockRecognitionResponse, ProcessingJobRead, RecognitionResponse, RecognitionSummaryResponse, ReviewItemsResponse, ReviewItemRead, TemporalContext, UploadVideoResponse, VideoAssetRead, VideoExportRead, VideoFrameRead, YoloExportRead, YoloExportResponse
-from app.services.coco_export import validate_coco_dataset
+from app.schemas.dataset import AnnotationCandidateRead, AnnotationCandidatesResponse, AnnotationProgressResponse, BasketballClassRead, BasketballClassesResponse, CocoExportRead, CocoExportResponse, DatasetVersionCreate, DatasetVersionManifestResponse, DatasetVersionRead, DatasetVersionSplitReportResponse, DatasetVersionSummaryRead, ExportDownloadResponse, FailureFrameRead, FailureFramesResponse, InconsistentFrameRead, InconsistentFramesResponse, InternalExportResponse, JerseyPredictionRead, JobQueuedResponse, ManualAnnotationCreate, ManualAnnotationRead, ManualAnnotationSaveResponse, ManualAnnotationUpdate, MockRecognitionResponse, ProcessingJobRead, RecognitionResponse, RecognitionSummaryResponse, ReviewItemsResponse, ReviewItemRead, SavedBoxRead, TemporalContext, UploadVideoResponse, VideoAssetRead, VideoExportRead, VideoFrameRead, YoloExportRead, YoloExportResponse
+from app.services.basketball_classes import BASKETBALL_CLASS_NAMES, CLASS_COUNT, NUMBER_BEARING_CLASS_ID, assert_matches_basketball_yaml, class_mapping_for_metadata, class_name, classes_txt_content, clean_jersey_number, describe as describe_basketball_classes, render_names_block, validate_class_id
+from app.services.coco_export import COCO_CATEGORIES, coco_category_id, validate_coco_dataset
 from app.services.dataset_versioning import build_dataset_version, list_dataset_versions, load_dataset_manifest, rebuild_dataset_version, validate_dataset_version
 from app.services.fixed7_adapter import Fixed7AdapterError, fixed7_diagnostic_report, run_fixed7_on_video
-from app.services.yolo_export import SPORT_CV_DETECTED_FRAMEWORK, SPORT_CV_DETECTED_MODEL_VERSION, SPORT_CV_TARGET_PROJECT, validate_yolo_dataset
-from app.services.mock_recognition import generate_mock_predictions
+from app.services.yolo_export import JERSEY_NUMBERS_FILENAME, JERSEY_NUMBERS_SCHEMA, SPORT_CV_DETECTED_FRAMEWORK, SPORT_CV_DETECTED_MODEL_VERSION, SPORT_CV_TARGET_PROJECT, validate_yolo_dataset
+from app.services.mock_recognition import MOCK_PREDICTION_WARNING, generate_mock_predictions, is_mock_prediction
 from app.services.real_recognition import RealJerseyRecognizer, RealRecognitionConfigurationError
 from app.services.storage import ensure_data_dirs, extract_frames, frame_output_dir, video_output_path
 from app.services.yolo_preannotation import YoloPreannotationError, YoloPreannotator
@@ -219,6 +220,8 @@ def _annotation_to_schema(row: ManualAnnotation) -> ManualAnnotationRead:
         video_id=row.video_id,
         frame_id=row.frame_id,
         track_id=row.track_id,
+        class_id=int(row.class_id),
+        class_name=class_name(int(row.class_id)),
         image_path=row.image_path,
         image_url=row.image_url,
         original_bbox=_parse_bbox(row.original_bbox, field_name="original_bbox", prediction_id=row.prediction_id),
@@ -228,6 +231,19 @@ def _annotation_to_schema(row: ManualAnnotation) -> ManualAnnotationRead:
         label_status=row.label_status,
         created_at=row.created_at,
         deleted_at=row.deleted_at,
+    )
+
+
+def _annotation_to_saved_box(row: ManualAnnotation) -> SavedBoxRead:
+    return SavedBoxRead(
+        annotation_id=row.annotation_id,
+        prediction_id=row.prediction_id,
+        class_id=int(row.class_id),
+        class_name=class_name(int(row.class_id)),
+        corrected_bbox=_parse_bbox(row.corrected_bbox, field_name="corrected_bbox", prediction_id=row.prediction_id),
+        corrected_number=row.corrected_number,
+        label_status=row.label_status,
+        track_id=int(row.track_id),
     )
 
 
@@ -242,6 +258,42 @@ def _annotation_matches(db: Session, prediction_id: int, video_id: int) -> list[
         .order_by(ManualAnnotation.annotation_id.asc())
         .all()
     )
+
+
+#: First id handed out to a hand-drawn box. Manual ids run DOWNWARD from here.
+#:
+#: Two disjoint negative ranges are in play and they must not collide:
+#:   -(frame_id + 1)          synthesised by list_review_items for a frame that
+#:                            has no prediction. Reaches -1000000 only past
+#:                            frame 999998.
+#:   <= MANUAL_BOX_ID_BASE    allocated here, one per hand-drawn box.
+#: Everything at or below the base is guaranteed to be a hand-drawn box.
+MANUAL_BOX_ID_BASE = -1_000_000
+
+
+def _allocate_manual_prediction_id(db: Session, video_id: int) -> int:
+    """Reserve a unique prediction_id for a newly drawn box.
+
+    A 5-class dataset needs SEVERAL boxes on one frame - players, a ball, a rim,
+    referees - but the original tool keyed annotation identity on
+    (prediction_id, video_id) and synthesised one id per FRAME, which capped it
+    at one hand-drawn box per image. Allocating one id per BOX lifts that cap
+    while leaving the upsert-by-prediction behaviour for real YOLO predictions
+    (positive ids) exactly as it was.
+
+    Ids also stay unique across the whole video because dataset_versioning treats
+    a repeated source_prediction_id as a split-leakage error.
+    """
+    lowest = (
+        db.query(ManualAnnotation.prediction_id)
+        .filter(ManualAnnotation.video_id == video_id)
+        .order_by(ManualAnnotation.prediction_id.asc())
+        .limit(1)
+        .scalar()
+    )
+    if lowest is None or int(lowest) > MANUAL_BOX_ID_BASE:
+        return MANUAL_BOX_ID_BASE
+    return int(lowest) - 1
 
 
 def _get_annotation_or_404(db: Session, annotation_id: int) -> ManualAnnotation:
@@ -1114,13 +1166,27 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
     predictions = db.query(JerseyPrediction).filter(JerseyPrediction.video_id == video_id).order_by(JerseyPrediction.frame_id.asc(), JerseyPrediction.track_id.asc(), JerseyPrediction.id.asc()).all()
     annotations = db.query(ManualAnnotation).filter(ManualAnnotation.video_id == video_id, ManualAnnotation.deleted_at.is_(None)).all()
     annotations_by_key = {(int(row.video_id), int(row.prediction_id)): row for row in annotations}
+    # Every saved box on a frame, whatever its class and however it was created.
+    # A 5-class frame holds many boxes, so a per-prediction lookup alone can no
+    # longer tell the UI what is already drawn on the image.
+    annotations_by_frame: dict[int, list[ManualAnnotation]] = {}
+    for row in annotations:
+        annotations_by_frame.setdefault(int(row.frame_id), []).append(row)
+    for rows in annotations_by_frame.values():
+        rows.sort(key=lambda item: (int(item.class_id), int(item.annotation_id)))
+
     predictions_by_frame: dict[int, list[JerseyPrediction]] = {}
     for prediction in predictions:
         predictions_by_frame.setdefault(int(prediction.frame_id), []).append(prediction)
 
+    mock_prediction_count = sum(1 for prediction in predictions if is_mock_prediction(prediction))
+
     items: list[ReviewItemRead] = []
     for frame in frames:
         frame_predictions = predictions_by_frame.get(int(frame.frame_id), [])
+        saved_boxes = [
+            _annotation_to_saved_box(row) for row in annotations_by_frame.get(int(frame.frame_id), [])
+        ]
         if frame_predictions:
             for prediction in frame_predictions:
                 frame_path, width, height, _ = _ensure_frame_metadata(prediction)
@@ -1140,10 +1206,13 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
                         jersey_bbox=_parse_bbox(prediction.jersey_bbox, field_name="jersey_bbox", prediction_id=prediction.id),
                         predicted_number=prediction.predicted_number,
                         confidence=float(prediction.confidence or 0.0),
+                        is_mock_prediction=is_mock_prediction(prediction),
+                        prediction_source=str(getattr(prediction, "source", "unknown")),
                         annotation_id=annotation.annotation_id if annotation is not None else None,
                         corrected_bbox=_parse_bbox(annotation.corrected_bbox, field_name="corrected_bbox", prediction_id=prediction.id) if annotation is not None else None,
                         corrected_number=annotation.corrected_number if annotation is not None else None,
                         label_status=annotation.label_status if annotation is not None else None,
+                        saved_boxes=saved_boxes,
                     )
                 )
         else:
@@ -1166,10 +1235,13 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
                     jersey_bbox=None,
                     predicted_number="",
                     confidence=0.0,
+                    is_mock_prediction=False,
+                    prediction_source="manual",
                     annotation_id=annotation.annotation_id if annotation is not None else None,
                     corrected_bbox=_parse_bbox(annotation.corrected_bbox, field_name="corrected_bbox", prediction_id=manual_prediction_id) if annotation is not None else None,
                     corrected_number=annotation.corrected_number if annotation is not None else None,
                     label_status=annotation.label_status if annotation is not None else None,
+                    saved_boxes=saved_boxes,
                 )
             )
 
@@ -1178,7 +1250,38 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
         message = "No frames found. Please upload a video first."
     elif not predictions:
         message = "No YOLO pre-annotations found. You can still annotate frames manually."
-    return ReviewItemsResponse(total_count=len(items), items=items, message=message)
+
+    mock_warning = None
+    if mock_prediction_count:
+        mock_warning = f"{mock_prediction_count} of {len(predictions)} predictions are MOCK. {MOCK_PREDICTION_WARNING}"
+        LOGGER.warning("video_id=%s review items include mock predictions: %s", video_id, mock_warning)
+
+    return ReviewItemsResponse(
+        total_count=len(items), items=items, message=message, mock_data_warning=mock_warning
+    )
+
+
+@router.get(
+    "/basketball-classes",
+    response_model=BasketballClassesResponse,
+    summary="Class scheme served from train/basketball.yaml",
+    description=(
+        "The 5-class basketball-v2 scheme. The annotation UI reads its class list "
+        "from here rather than hardcoding one, so appending a class upstream cannot "
+        "leave the UI offering a stale set while the exporter uses the new one."
+    ),
+    tags=["Dataset export"],
+)
+def get_basketball_classes() -> BasketballClassesResponse:
+    described = describe_basketball_classes()
+    return BasketballClassesResponse(
+        class_count=described["class_count"],
+        classes=[BasketballClassRead(**item) for item in described["classes"]],
+        number_bearing_class_id=described["number_bearing_class_id"],
+        number_bearing_class_name=described["number_bearing_class_name"],
+        jersey_number_rule=described["jersey_number_rule"],
+        source_of_truth=described["source_of_truth"],
+    )
 
 
 @router.post(
@@ -1189,29 +1292,40 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
     tags=["人工标注"],
 )
 def save_annotation(payload: ManualAnnotationCreate, db: Session = Depends(get_db)):
+    """Save one box.
+
+    Two paths, decided by the sign of prediction_id:
+
+    * prediction_id >= 0 - the box corrects a real YOLO prediction. At most one
+      annotation may exist per prediction, so this UPSERTS, exactly as before.
+    * prediction_id < 0 - the box was drawn by hand. Always INSERTS, under a
+      freshly allocated unique id, so a frame can carry as many boxes as the
+      image actually contains. Editing an existing hand-drawn box goes through
+      PUT /annotations/{annotation_id}, not through here.
+    """
     video = db.query(VideoAsset).filter(VideoAsset.id == payload.video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    matches = _annotation_matches(db, payload.prediction_id, payload.video_id)
-    row = next((item for item in matches if item.deleted_at is None), None) or (matches[0] if matches else None) or ManualAnnotation(
-        prediction_id=payload.prediction_id,
-        video_id=payload.video_id,
-        frame_id=payload.frame_id,
-        track_id=payload.track_id,
-        image_path=payload.image_path,
-        image_url=payload.image_url,
-        original_bbox=json.dumps(payload.original_bbox),
-        corrected_bbox=json.dumps(payload.corrected_bbox),
-        original_number=payload.original_number,
-        corrected_number=payload.corrected_number,
-        label_status=payload.label_status,
-    )
+    is_manual_box = payload.prediction_id < 0
+    if is_manual_box:
+        prediction_id = _allocate_manual_prediction_id(db, payload.video_id)
+        matches: list[ManualAnnotation] = []
+        row = ManualAnnotation(prediction_id=prediction_id)
+    else:
+        prediction_id = payload.prediction_id
+        matches = _annotation_matches(db, prediction_id, payload.video_id)
+        row = (
+            next((item for item in matches if item.deleted_at is None), None)
+            or (matches[0] if matches else None)
+            or ManualAnnotation(prediction_id=prediction_id)
+        )
 
-    row.prediction_id = payload.prediction_id
+    row.prediction_id = prediction_id
     row.video_id = payload.video_id
     row.frame_id = payload.frame_id
     row.track_id = payload.track_id
+    row.class_id = payload.class_id
     row.image_path = payload.image_path
     row.image_url = payload.image_url
     row.original_bbox = json.dumps(payload.original_bbox)
@@ -1246,6 +1360,9 @@ def update_annotation(annotation_id: int, payload: ManualAnnotationUpdate, db: S
     row = _get_annotation_or_404(db, annotation_id)
     video = db.query(VideoAsset).filter(VideoAsset.id == row.video_id).first()
     row.corrected_bbox = json.dumps(payload.corrected_bbox)
+    # Reclassification is allowed here: correcting a referee mislabelled as a
+    # player should not require deleting a box whose geometry is already right.
+    row.class_id = payload.class_id
     row.corrected_number = payload.corrected_number
     row.label_status = payload.label_status
     db.add(row)
@@ -1616,7 +1733,9 @@ def export_coco_dataset(video_id: int, db: Session = Depends(get_db)):
         coco_annotations.append({
             "id": coco_annotation_id,
             "image_id": image_entry["id"],
-            "category_id": 1,
+            "category_id": coco_category_id(validate_class_id(annotation.class_id)),
+            "class_id": validate_class_id(annotation.class_id),
+            "class_name": class_name(validate_class_id(annotation.class_id)),
             "bbox": [coco_x, coco_y, coco_width, coco_height],
             "area": area,
             "iscrowd": 0,
@@ -1666,13 +1785,9 @@ def export_coco_dataset(video_id: int, db: Session = Depends(get_db)):
         "licenses": [],
         "images": coco_images,
         "annotations": coco_annotations,
-        "categories": [
-            {
-                "id": 1,
-                "name": "jersey",
-                "supercategory": "sports_uniform",
-            }
-        ],
+        # Derived from train/basketball.yaml, offset by one because COCO ids are
+        # 1-based while YOLO class ids are 0-based. See coco_export.py.
+        "categories": COCO_CATEGORIES,
     }
     instances_path = annotations_dir / "instances.json"
     instances_path.write_text(json.dumps(instances_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1815,6 +1930,8 @@ def export_yolo_dataset(video_id: int, db: Session = Depends(get_db)):
     skipped_invalid_bbox_count = 0
     skipped_missing_image_count = 0
     skipped_annotations: list[dict[str, object]] = []
+    counts_by_class: dict[int, int] = {}
+    jersey_numbers: list[dict[str, object]] = []
 
     for annotation in annotations:
         if annotation.label_status == "unclear":
@@ -1881,10 +1998,34 @@ def export_yolo_dataset(video_id: int, db: Session = Depends(get_db)):
             }
             label_lines[label_filename] = []
 
+        annotation_class_id = validate_class_id(annotation.class_id)
+        line_index = len(label_lines[label_filename])
         label_lines[label_filename].append(
-            f"0 {x_center:.6f} {y_center:.6f} {normalized_width:.6f} {normalized_height:.6f}"
+            f"{annotation_class_id} {x_center:.6f} {y_center:.6f} "
+            f"{normalized_width:.6f} {normalized_height:.6f}"
         )
+        counts_by_class[annotation_class_id] = counts_by_class.get(annotation_class_id, 0) + 1
         annotation_count += 1
+
+        # The number is NOT a class and never enters a label file. It is written
+        # to jersey_numbers.json, keyed to the label line it describes, so it can
+        # serve as OCR ground truth without polluting detector training data.
+        if annotation_class_id == NUMBER_BEARING_CLASS_ID and annotation.corrected_number:
+            normalized_number = clean_jersey_number(annotation.corrected_number)
+            if normalized_number is not None:
+                jersey_numbers.append(
+                    {
+                        "label_file": label_filename,
+                        "image_file": image_filename,
+                        "label_line_index": line_index,
+                        "jersey_number": normalized_number,
+                        "video_id": int(annotation.video_id),
+                        "frame_id": int(annotation.frame_id),
+                        "track_id": int(annotation.track_id),
+                        "source_annotation_id": int(annotation.annotation_id),
+                        "bbox_xyxy": corrected_bbox,
+                    }
+                )
 
     if annotation_count == 0:
         raise HTTPException(status_code=400, detail="No valid annotations available for export.")
@@ -1893,22 +2034,54 @@ def export_yolo_dataset(video_id: int, db: Session = Depends(get_db)):
         (labels_dir / label_filename).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     dataset_yaml = export_dir / "dataset.yaml"
+    # 'path', 'train' and 'val' describe THIS export and legitimately differ from
+    # train/basketball.yaml; nc and names must not, and are rendered from it.
     dataset_yaml.write_text(
-        "\n".join([
-            f'path: "{str(export_dir.resolve()).replace(chr(92), "/")}"',
-            "train: images",
-            "val: images",
-            "nc: 1",
-            "names:",
-            "  0: jersey",
-            "",
-        ]),
+        "\n".join(
+            [
+                f'path: "{str(export_dir.resolve()).replace(chr(92), "/")}"',
+                "train: images",
+                "val: images",
+            ]
+            + render_names_block()
+            + [""]
+        ),
+        encoding="utf-8",
+    )
+    # Refuse to ship a dataset whose class indices disagree with the code that
+    # will consume it - the failure is otherwise completely silent.
+    assert_matches_basketball_yaml(dataset_yaml)
+
+    classes_txt = export_dir / "classes.txt"
+    classes_txt.write_text(classes_txt_content(), encoding="utf-8")
+
+    jersey_numbers_path = export_dir / JERSEY_NUMBERS_FILENAME
+    jersey_numbers_path.write_text(
+        json.dumps(
+            {
+                "schema": JERSEY_NUMBERS_SCHEMA,
+                "class_id": NUMBER_BEARING_CLASS_ID,
+                "class_name": class_name(NUMBER_BEARING_CLASS_ID),
+                "normalization": (
+                    "src/jersey.py:clean_jersey_number - digits only, max 2, '00' "
+                    "rejected, leading zeros stripped ('01' -> '1'), bare '0' kept"
+                ),
+                "usage": (
+                    "OCR ground truth. Join to a YOLO label line via "
+                    "(label_file, label_line_index); that line is always a jersey line."
+                ),
+                "entry_count": len(jersey_numbers),
+                "entries": jersey_numbers,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
-    classes_txt = export_dir / "classes.txt"
-    classes_txt.write_text("jersey\n", encoding="utf-8")
-
+    annotation_counts_by_class = {
+        BASKETBALL_CLASS_NAMES[class_id]: count for class_id, count in sorted(counts_by_class.items())
+    }
     metadata = {
         "export_id": export_id,
         "video_id": video_id,
@@ -1918,8 +2091,15 @@ def export_yolo_dataset(video_id: int, db: Session = Depends(get_db)):
         "target_project": SPORT_CV_TARGET_PROJECT,
         "detected_framework": SPORT_CV_DETECTED_FRAMEWORK,
         "detected_model_version": SPORT_CV_DETECTED_MODEL_VERSION,
-        "class_count": 1,
-        "class_mapping": {"0": "jersey"},
+        "class_count": CLASS_COUNT,
+        "class_mapping": class_mapping_for_metadata(),
+        "annotation_counts_by_class": annotation_counts_by_class,
+        "classes_with_no_annotations": [
+            name for index, name in sorted(BASKETBALL_CLASS_NAMES.items())
+            if counts_by_class.get(index, 0) == 0
+        ],
+        "jersey_number_count": len(jersey_numbers),
+        "jersey_numbers_file": JERSEY_NUMBERS_FILENAME,
         "image_count": len(image_entries),
         "annotation_count": annotation_count,
         "label_file_count": len(label_lines),
@@ -1931,8 +2111,14 @@ def export_yolo_dataset(video_id: int, db: Session = Depends(get_db)):
         "sport_cv_compatible": True,
         "compatibility_notes": [
             "Export targets Ultralytics YOLO compatibility used by Sport-CV.",
-            "Sport-CV MVP currently assumes class 0 means player; this export is a separate one-class jersey detector dataset.",
-            "Train/val split is not implemented yet; train and val both point to images/ for temporary compatibility.",
+            "Class scheme is read from basketball-v2 train/basketball.yaml and verified "
+            "against it field by field before this file is written.",
+            "The jersey NUMBER is not a class. It is exported separately in "
+            f"{JERSEY_NUMBERS_FILENAME} as OCR ground truth.",
+            "THIS EXPORT HAS NO TRAIN/VAL SPLIT: train and val both point at images/, so "
+            "training on it measures nothing. Use POST /dataset-versions instead, which "
+            "splits by video or track and refuses to let one player's frames land on both "
+            "sides.",
         ],
     }
     metadata_path = export_dir / "metadata.json"
@@ -1954,6 +2140,9 @@ def export_yolo_dataset(video_id: int, db: Session = Depends(get_db)):
         image_count=len(image_entries),
         annotation_count=annotation_count,
         label_file_count=len(label_lines),
+        class_count=CLASS_COUNT,
+        annotation_counts_by_class=annotation_counts_by_class,
+        jersey_number_count=len(jersey_numbers),
         skipped_unclear_count=skipped_unclear_count,
         skipped_invalid_bbox_count=skipped_invalid_bbox_count,
         skipped_missing_image_count=skipped_missing_image_count,
@@ -1964,6 +2153,7 @@ def export_yolo_dataset(video_id: int, db: Session = Depends(get_db)):
             str((export_dir / "labels").resolve()),
             str(dataset_yaml.resolve()),
             str(classes_txt.resolve()),
+            str(jersey_numbers_path.resolve()),
             str(metadata_path.resolve()),
         ],
     )
@@ -1995,6 +2185,12 @@ def list_yolo_exports(video_id: int, db: Session = Depends(get_db)):
                 image_count=_int_metadata_value(metadata, "image_count"),
                 annotation_count=_int_metadata_value(metadata, "annotation_count"),
                 label_file_count=_int_metadata_value(metadata, "label_file_count"),
+                class_count=_int_metadata_value(metadata, "class_count"),
+                annotation_counts_by_class={
+                    str(key): int(value)
+                    for key, value in (metadata.get("annotation_counts_by_class") or {}).items()
+                },
+                jersey_number_count=_int_metadata_value(metadata, "jersey_number_count"),
                 skipped_unclear_count=_int_metadata_value(metadata, "skipped_unclear_count"),
                 skipped_invalid_bbox_count=_int_metadata_value(metadata, "skipped_invalid_bbox_count"),
                 skipped_missing_image_count=_int_metadata_value(metadata, "skipped_missing_image_count"),

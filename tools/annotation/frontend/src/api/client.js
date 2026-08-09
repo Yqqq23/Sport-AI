@@ -29,6 +29,17 @@ export async function fetchVideos() {
   return request('/videos')
 }
 
+/**
+ * The class scheme, served from basketball-v2 train/basketball.yaml.
+ *
+ * Deliberately fetched instead of hardcoded here: a class appended upstream
+ * would otherwise leave this UI offering a stale list while the exporter writes
+ * the new one, and nothing would report the mismatch.
+ */
+export async function fetchBasketballClasses() {
+  return request('/basketball-classes')
+}
+
 export async function uploadVideo(file) {
   const body = new FormData()
   body.append('file', file)

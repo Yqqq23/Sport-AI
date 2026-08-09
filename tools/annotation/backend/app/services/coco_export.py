@@ -1,5 +1,38 @@
+"""COCO export validation.
+
+Kept in step with the YOLO export: both describe the same annotations, so a
+5-class YOLO export next to a 1-class COCO export would be a trap for whoever
+picks the COCO one.
+
+COCO category ids are 1-based by convention while YOLO class ids are 0-based, so
+the mapping is ``category_id = yolo_class_id + 1``. That offset is defined once,
+here, and must not be re-derived anywhere else.
+"""
+
 import json
 from pathlib import Path
+
+from app.services.basketball_classes import BASKETBALL_CLASS_NAMES, CLASS_COUNT
+
+#: COCO ids start at 1; YOLO class ids start at 0.
+COCO_CATEGORY_ID_OFFSET = 1
+
+#: The categories block every COCO export must contain, in class-index order.
+COCO_CATEGORIES: list[dict[str, object]] = [
+    {
+        "id": class_id + COCO_CATEGORY_ID_OFFSET,
+        "name": BASKETBALL_CLASS_NAMES[class_id],
+        "supercategory": "basketball",
+    }
+    for class_id in range(CLASS_COUNT)
+]
+
+_VALID_CATEGORY_IDS = {int(category["id"]) for category in COCO_CATEGORIES}
+
+
+def coco_category_id(class_id: int) -> int:
+    """Convert a YOLO class id into its COCO category id."""
+    return int(class_id) + COCO_CATEGORY_ID_OFFSET
 
 
 def validate_coco_dataset(instances_path: str | Path) -> dict[str, object]:
@@ -28,9 +61,13 @@ def validate_coco_dataset(instances_path: str | Path) -> dict[str, object]:
         errors.append("categories must be a list")
         categories = []
 
-    jersey_categories = [item for item in categories if item.get("id") == 1 and item.get("name") == "jersey"]
-    if len(jersey_categories) != 1:
-        errors.append("exactly one jersey category with id=1 must exist")
+    declared = [
+        {"id": item.get("id"), "name": item.get("name")}
+        for item in sorted(categories, key=lambda entry: entry.get("id") or 0)
+    ]
+    expected = [{"id": item["id"], "name": item["name"]} for item in COCO_CATEGORIES]
+    if declared != expected:
+        errors.append(f"categories must be exactly {expected}, got {declared}")
 
     image_ids = [item.get("id") for item in images]
     if len(image_ids) != len(set(image_ids)):
@@ -49,8 +86,11 @@ def validate_coco_dataset(instances_path: str | Path) -> dict[str, object]:
     for annotation in annotations:
         if annotation.get("image_id") not in image_id_set:
             errors.append(f"annotation {annotation.get('id')} references missing image_id {annotation.get('image_id')}")
-        if annotation.get("category_id") != 1:
-            errors.append(f"annotation {annotation.get('id')} has invalid category_id {annotation.get('category_id')}")
+        if annotation.get("category_id") not in _VALID_CATEGORY_IDS:
+            errors.append(
+                f"annotation {annotation.get('id')} has category_id "
+                f"{annotation.get('category_id')}, not one of {sorted(_VALID_CATEGORY_IDS)}"
+            )
         bbox = annotation.get("bbox")
         if not isinstance(bbox, list) or len(bbox) != 4 or not all(isinstance(value, (int, float)) for value in bbox):
             errors.append(f"annotation {annotation.get('id')} has invalid bbox")

@@ -15,13 +15,54 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.dataset import DatasetVersion, ManualAnnotation, VideoAsset, VideoFrame
-from app.services.yolo_export import SPORT_CV_TARGET_PROJECT
+from app.services.basketball_classes import (
+    BASKETBALL_CLASS_NAMES,
+    BASKETBALL_YAML,
+    CLASS_COUNT,
+    CLASS_JERSEY as CLASS_JERSEY_ID,
+    CLASS_NAMES_IN_INDEX_ORDER,
+    CLASS_PLAYER as CLASS_PLAYER_ID,
+    NUMBER_BEARING_CLASS_ID,
+    assert_matches_basketball_yaml,
+    class_mapping_for_metadata,
+    class_name,
+    classes_txt_content,
+    clean_jersey_number,
+    compare_with_basketball_yaml,
+    render_names_block,
+    validate_class_id,
+)
+from app.services.yolo_export import (
+    JERSEY_NUMBERS_FILENAME,
+    JERSEY_NUMBERS_SCHEMA,
+    SPORT_CV_TARGET_PROJECT,
+)
 
 
 EXPORTABLE_LABEL_STATUSES = {"correct", "wrong_bbox", "wrong_number"}
+
+#: Classes whose track_id identifies a PERSON, and are therefore the only ones
+#: that can leak a player identity across a train/val boundary.
+#:
+#: This filter is required by the move to 5 classes. The 'track' split strategy
+#: builds a graph joining frames that share a track id; ball and rim boxes have
+#: no meaningful identity and are stored with a placeholder track id, so leaving
+#: them in would join EVERY frame containing a ball to every other one through a
+#: single shared node. The whole video would collapse into one component and the
+#: track strategy would silently degenerate into the video strategy - still
+#: leak-free, but no longer doing what it claims.
+#:
+#: Referee is excluded too: it carries no jersey number and no per-identity
+#: evaluation, so it is not a leakage channel worth constraining the split with.
+IDENTITY_CLASS_IDS = frozenset({CLASS_PLAYER_ID, CLASS_JERSEY_ID})
+
+#: track_id value the tool stores when a box has no identity (ball, rim) or the
+#: annotator did not supply one. Never used for grouping.
+UNASSIGNED_TRACK_ID = 0
 DATASET_FORMAT = "yolo_detection_versioned_v1"
-TASK_TYPE = "jersey_bbox_detection"
-CLASS_MAPPING = {"0": "jersey"}
+TASK_TYPE = "basketball_multiclass_detection"
+#: Derived from train/basketball.yaml, never hand-written here.
+CLASS_MAPPING = class_mapping_for_metadata()
 SPLIT_NAMES = ["train", "val", "test"]
 
 
@@ -105,11 +146,16 @@ def _normalized_yolo_bbox(bbox: list[int], image_width: int, image_height: int) 
 
 
 def _serialize_source_record(annotation: ManualAnnotation) -> dict[str, Any]:
+    # class_id participates in the fingerprint: reclassifying a box from player
+    # to referee changes the dataset even when the geometry is untouched, and a
+    # fingerprint that missed it would let rebuild_dataset_version report the
+    # version as still current.
     return {
         "video_id": int(annotation.video_id),
         "frame_id": int(annotation.frame_id),
         "annotation_id": int(annotation.annotation_id),
         "prediction_id": int(annotation.prediction_id),
+        "class_id": int(annotation.class_id),
         "corrected_bbox": _parse_bbox(annotation.corrected_bbox),
         "corrected_number": annotation.corrected_number,
         "label_status": annotation.label_status,
@@ -187,7 +233,11 @@ def build_canonical_images(annotations: list[ManualAnnotation], frame_map: dict[
             }
             images[key] = image
         image["annotations"].append(annotation)
-        image["track_ids"].add(int(annotation.track_id))
+        # Only identity-bearing classes with a real track id contribute to the
+        # grouping graph. See IDENTITY_CLASS_IDS for why ball/rim/referee and the
+        # placeholder track id must be excluded.
+        if int(annotation.class_id) in IDENTITY_CLASS_IDS and int(annotation.track_id) != UNASSIGNED_TRACK_ID:
+            image["track_ids"].add(int(annotation.track_id))
         image["source_annotation_ids"].add(int(annotation.annotation_id))
         image["source_prediction_ids"].add(int(annotation.prediction_id))
         if image["source_frame_path"] is None and frame_path is not None:
@@ -340,23 +390,66 @@ def _build_manifest_record(image: dict[str, Any], split_name: str, exported_imag
     }
 
 
-def _write_version_files(dataset_root: Path, manifest: list[dict[str, Any]], metadata: dict[str, Any], split_report: dict[str, Any]) -> tuple[Path, Path, Path, Path]:
+def _write_version_files(
+    dataset_root: Path,
+    manifest: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    split_report: dict[str, Any],
+    jersey_numbers: list[dict[str, Any]],
+) -> tuple[Path, Path, Path, Path]:
     dataset_yaml = dataset_root / "dataset.yaml"
+    # 'path', 'train', 'val' and 'test' describe THIS export's layout and are
+    # expected to differ from train/basketball.yaml. The class scheme is not:
+    # nc and names are rendered straight from the source of truth and then
+    # compared back against it below.
     dataset_yaml.write_text(
-        "\n".join([
-            f'path: "{str(dataset_root.resolve()).replace(chr(92), "/")}"',
-            "train: images/train",
-            "val: images/val",
-            "test: images/test",
-            "nc: 1",
-            "names:",
-            "  0: jersey",
-            "",
-        ]),
+        "\n".join(
+            [
+                f'path: "{str(dataset_root.resolve()).replace(chr(92), "/")}"',
+                "train: images/train",
+                "val: images/val",
+                "test: images/test",
+            ]
+            + render_names_block()
+            + [""]
+        ),
         encoding="utf-8",
     )
+    # Hard-fail rather than ship a dataset whose indices disagree with the code
+    # that will consume it. A wrong index is invisible downstream: Ultralytics
+    # imports it without complaint and trains every class under the wrong label.
+    assert_matches_basketball_yaml(dataset_yaml)
+
     classes_txt = dataset_root / "classes.txt"
-    classes_txt.write_text("jersey\n", encoding="utf-8")
+    classes_txt.write_text(classes_txt_content(), encoding="utf-8")
+
+    # The jersey number is NOT a detection class and never enters a label file.
+    # It lives here, keyed to the exact label line it describes, so it can be
+    # used as OCR ground truth without polluting the detector's training data.
+    jersey_numbers_path = dataset_root / JERSEY_NUMBERS_FILENAME
+    jersey_numbers_path.write_text(
+        json.dumps(
+            {
+                "schema": JERSEY_NUMBERS_SCHEMA,
+                "class_id": NUMBER_BEARING_CLASS_ID,
+                "class_name": class_name(NUMBER_BEARING_CLASS_ID),
+                "normalization": (
+                    "src/jersey.py:clean_jersey_number - digits only, max 2, '00' "
+                    "rejected, leading zeros stripped ('01' -> '1'), bare '0' kept"
+                ),
+                "usage": (
+                    "OCR ground truth. Join to a YOLO label line via "
+                    "(label_file, label_line_index); that line is always a jersey line."
+                ),
+                "entry_count": len(jersey_numbers),
+                "entries": jersey_numbers,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
     manifest_path = dataset_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     metadata_path = dataset_root / "metadata.json"
@@ -396,8 +489,14 @@ def validate_dataset_version(export_root: str | Path, split_strategy: str) -> di
         return {"valid": False, "errors": errors, "warnings": warnings, "checks": {}}
 
     classes = [line.strip() for line in classes_txt.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if classes != ["jersey"]:
-        errors.append("classes.txt must contain exactly one class: jersey")
+    if classes != CLASS_NAMES_IN_INDEX_ORDER:
+        errors.append(
+            f"classes.txt must list the {CLASS_COUNT} basketball classes in INDEX order "
+            f"{CLASS_NAMES_IN_INDEX_ORDER}, got {classes}. Position is the class id, so "
+            "ordering is not cosmetic."
+        )
+    # Field-by-field comparison against train/basketball.yaml (nc + names).
+    errors.extend(compare_with_basketball_yaml(dataset_yaml))
 
     image_to_split: dict[tuple[int, int], str] = {}
     annotation_ids: set[int] = set()
@@ -409,6 +508,8 @@ def validate_dataset_version(export_root: str | Path, split_strategy: str) -> di
     split_counts = {split_name: {"images": 0, "annotations": 0} for split_name in SPLIT_NAMES}
     image_files_seen: set[str] = set()
     label_files_seen: set[str] = set()
+    counts_by_class: dict[int, int] = {}
+    label_lines_by_file: dict[str, list[str]] = {}
     for item in manifest:
         split_name = item["split"]
         split_counts[split_name]["images"] += 1
@@ -434,17 +535,21 @@ def validate_dataset_version(export_root: str | Path, split_strategy: str) -> di
         for annotation in item["annotations"]:
             annotation_id = int(annotation["source_annotation_id"])
             prediction_id = int(annotation["prediction_id"])
-            track_key = (int(item["source_video_id"]), int(annotation["track_id"]))
             if annotation_id in annotation_ids:
                 errors.append(f"source_annotation_id duplicated across splits: {annotation_id}")
             annotation_ids.add(annotation_id)
             if prediction_id in prediction_ids:
                 errors.append(f"source_prediction_id duplicated across splits: {prediction_id}")
             prediction_ids.add(prediction_id)
-            track_split_map[track_key].add(split_name)
+            # Same filter as the grouping graph. Without it, every frame holding
+            # a ball or rim box would share the placeholder track id and this
+            # check would report leakage that does not exist.
+            if int(annotation.get("class_id", -1)) in IDENTITY_CLASS_IDS and int(annotation["track_id"]) != UNASSIGNED_TRACK_ID:
+                track_split_map[(int(item["source_video_id"]), int(annotation["track_id"]))].add(split_name)
             split_counts[split_name]["annotations"] += 1
 
         label_lines = [line.strip() for line in exported_label_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        label_lines_by_file[exported_label_path.name] = label_lines
         if len(label_lines) != len(item["annotations"]):
             errors.append(f"label line count mismatch for {exported_label_path.name}")
         for line_number, line in enumerate(label_lines, start=1):
@@ -458,8 +563,25 @@ def validate_dataset_version(export_root: str | Path, split_strategy: str) -> di
             except ValueError:
                 errors.append(f"{exported_label_path.name}:{line_number} contains non-numeric values")
                 continue
-            if class_id != 0:
-                errors.append(f"{exported_label_path.name}:{line_number} invalid class_id {class_id}")
+            if class_id not in BASKETBALL_CLASS_NAMES:
+                errors.append(
+                    f"{exported_label_path.name}:{line_number} has class_id {class_id}, not one "
+                    f"of the {CLASS_COUNT} basketball classes {CLASS_NAMES_IN_INDEX_ORDER}"
+                )
+            else:
+                counts_by_class[class_id] = counts_by_class.get(class_id, 0) + 1
+            # The label line and the manifest entry must agree on the class, or
+            # the manifest stops being a usable audit trail for the labels.
+            manifest_annotation = (
+                item["annotations"][line_number - 1]
+                if line_number - 1 < len(item["annotations"])
+                else None
+            )
+            if manifest_annotation is not None and int(manifest_annotation.get("class_id", -1)) != class_id:
+                errors.append(
+                    f"{exported_label_path.name}:{line_number} class_id {class_id} disagrees with "
+                    f"manifest class_id {manifest_annotation.get('class_id')}"
+                )
             x_center, y_center, width, height = values
             if not (0.0 <= x_center <= 1.0 and 0.0 <= y_center <= 1.0 and 0.0 < width <= 1.0 and 0.0 < height <= 1.0):
                 errors.append(f"{exported_label_path.name}:{line_number} has invalid normalized bbox")
@@ -484,10 +606,35 @@ def validate_dataset_version(export_root: str | Path, split_strategy: str) -> di
         if int(metadata_split.get("annotations", 0)) != split_counts[split_name]["annotations"]:
             errors.append(f"metadata annotation count mismatch for split {split_name}")
 
+    from app.services.yolo_export import validate_jersey_numbers_file
+
+    jersey_number_count = validate_jersey_numbers_file(
+        root / JERSEY_NUMBERS_FILENAME, label_lines_by_file, errors
+    )
+
+    empty_classes = [
+        name
+        for index, name in sorted(BASKETBALL_CLASS_NAMES.items())
+        if counts_by_class.get(index, 0) == 0
+    ]
+    if empty_classes:
+        # A warning, not an error: an early annotation pass legitimately covers
+        # only some classes. Surfaced now so it is noticed before a training run
+        # reports a mAP of zero for a class nobody labelled.
+        warnings.append(
+            "classes with no annotations in this version: " + ", ".join(empty_classes)
+        )
+
     checks = {
         "image_count": len(manifest),
         "annotation_count": sum(len(item["annotations"]) for item in manifest),
         "class_names": classes,
+        "annotation_counts_by_class": {
+            BASKETBALL_CLASS_NAMES[class_id]: count
+            for class_id, count in sorted(counts_by_class.items())
+        },
+        "classes_with_no_annotations": empty_classes,
+        "jersey_number_count": jersey_number_count,
         "split_report_present": bool(split_report),
     }
     return {"valid": not errors, "errors": errors, "warnings": warnings, "checks": checks}
@@ -579,6 +726,32 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
 
     try:
         canonical_images = build_canonical_images(annotations, frame_map)
+
+        # The 'track' strategy only protects against identity leakage if the
+        # identity-bearing boxes actually carry track ids. When they do not, every
+        # frame becomes its own group and two frames of the SAME player can land
+        # on opposite sides of the split - the exact leakage this strategy exists
+        # to prevent, failing silently. Say so loudly.
+        untracked_identity_annotations = [
+            annotation
+            for annotation in annotations
+            if int(annotation.class_id) in IDENTITY_CLASS_IDS
+            and int(annotation.track_id) == UNASSIGNED_TRACK_ID
+        ]
+        strategy_warnings: list[str] = []
+        if split_strategy == "track" and untracked_identity_annotations:
+            message = (
+                f"split_strategy='track' but {len(untracked_identity_annotations)} of "
+                f"{len(annotations)} player/jersey annotations have no track id "
+                f"(track_id={UNASSIGNED_TRACK_ID}). Those frames are grouped individually, "
+                "so two frames of the same player CAN end up in different splits. "
+                "Assign track ids, or use split_strategy='video', which is leak-free "
+                "without them."
+            )
+            if strict_split:
+                raise HTTPException(status_code=400, detail=message)
+            strategy_warnings.append(message)
+
         groups, conflict_warnings = build_image_groups(canonical_images, split_strategy, temporal_block_size)
         split_ratios = {"train": train_ratio, "val": val_ratio, "test": test_ratio}
         assignments = assign_groups_to_splits(groups, split_ratios, random_seed)
@@ -590,7 +763,7 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
             split_to_image_keys[split_name].extend(group["image_keys"])
             group_counts[split_name] += 1
 
-        warnings: list[str] = []
+        warnings: list[str] = list(strategy_warnings)
         if strict_split:
             for split_name, ratio in split_ratios.items():
                 if ratio > 0 and not split_to_image_keys[split_name]:
@@ -604,7 +777,11 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
         skipped_unclear_count = 0
         skipped_invalid_bbox_count = 0
         skipped_missing_image_count = 0
+        skipped_invalid_class_count = 0
+        skipped_invalid_number_count = 0
         skipped_annotations: list[dict[str, Any]] = []
+        counts_by_class: dict[int, int] = {}
+        jersey_numbers: list[dict[str, Any]] = []
         split_counts = {split_name: {"images": 0, "annotations": 0} for split_name in SPLIT_NAMES}
 
         for split_name in SPLIT_NAMES:
@@ -626,10 +803,19 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
 
                 label_lines: list[str] = []
                 annotation_payloads: list[dict[str, Any]] = []
+                # Collected per image, then rewritten with the real filename once
+                # the image is known to be kept.
+                pending_numbers: list[dict[str, Any]] = []
                 for annotation in image["annotations"]:
                     if annotation.label_status == "unclear":
                         skipped_unclear_count += 1
                         skipped_annotations.append({"annotation_id": int(annotation.annotation_id), "frame_id": int(annotation.frame_id), "reason": "unclear_label_status"})
+                        continue
+                    try:
+                        annotation_class_id = validate_class_id(annotation.class_id)
+                    except ValueError:
+                        skipped_invalid_class_count += 1
+                        skipped_annotations.append({"annotation_id": int(annotation.annotation_id), "frame_id": int(annotation.frame_id), "reason": "invalid_class_id"})
                         continue
                     try:
                         corrected_bbox = _parse_bbox(annotation.corrected_bbox)
@@ -638,18 +824,56 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
                         skipped_invalid_bbox_count += 1
                         skipped_annotations.append({"annotation_id": int(annotation.annotation_id), "frame_id": int(annotation.frame_id), "reason": "invalid_bbox"})
                         continue
-                    label_lines.append(f"0 {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} {yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}")
+
+                    line_index = len(label_lines)
+                    label_lines.append(
+                        f"{annotation_class_id} {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} "
+                        f"{yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}"
+                    )
+                    counts_by_class[annotation_class_id] = counts_by_class.get(annotation_class_id, 0) + 1
                     annotation_payloads.append(
                         {
                             "source_annotation_id": int(annotation.annotation_id),
                             "prediction_id": int(annotation.prediction_id),
                             "track_id": int(annotation.track_id),
+                            "class_id": annotation_class_id,
+                            "class_name": class_name(annotation_class_id),
                             "corrected_bbox": clamped_bbox,
                             "corrected_number": annotation.corrected_number,
                             "label_status": annotation.label_status,
                             "yolo_bbox": yolo_bbox,
                         }
                     )
+
+                    # Jersey numbers travel in jersey_numbers.json, NOT in the
+                    # label file. Turning digits into classes would need
+                    # per-number training data and still would not generalise to
+                    # an unseen number; the number is OCR ground truth instead.
+                    if annotation_class_id == NUMBER_BEARING_CLASS_ID and annotation.corrected_number:
+                        normalized = clean_jersey_number(annotation.corrected_number)
+                        if normalized is None:
+                            skipped_invalid_number_count += 1
+                            skipped_annotations.append(
+                                {
+                                    "annotation_id": int(annotation.annotation_id),
+                                    "frame_id": int(annotation.frame_id),
+                                    "reason": "invalid_jersey_number",
+                                }
+                            )
+                        else:
+                            pending_numbers.append(
+                                {
+                                    "split": split_name,
+                                    "label_line_index": line_index,
+                                    "jersey_number": normalized,
+                                    "video_id": int(annotation.video_id),
+                                    "frame_id": int(annotation.frame_id),
+                                    "track_id": int(annotation.track_id),
+                                    "source_annotation_id": int(annotation.annotation_id),
+                                    "bbox_xyxy": clamped_bbox,
+                                    "yolo_bbox": yolo_bbox,
+                                }
+                            )
 
                 if not annotation_payloads:
                     continue
@@ -660,6 +884,11 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
                 exported_label_path = dataset_root / "labels" / split_name / label_filename
                 shutil.copy2(source_frame_path, exported_image_path)
                 exported_label_path.write_text("\n".join(label_lines) + "\n", encoding="utf-8")
+
+                for entry in pending_numbers:
+                    entry["label_file"] = label_filename
+                    entry["image_file"] = image_filename
+                    jersey_numbers.append(entry)
 
                 manifest.append(_build_manifest_record(image, split_name, exported_image_path, exported_label_path, annotation_payloads))
                 split_counts[split_name]["images"] += 1
@@ -695,9 +924,25 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
             "image_count": total_images,
             "annotation_count": total_annotations,
             "split_counts": split_counts,
+            "class_count": CLASS_COUNT,
+            "class_mapping": CLASS_MAPPING,
+            "class_scheme_source": str(BASKETBALL_YAML),
+            "annotation_counts_by_class": {
+                BASKETBALL_CLASS_NAMES[class_id]: count
+                for class_id, count in sorted(counts_by_class.items())
+            },
+            "classes_with_no_annotations": [
+                name
+                for index, name in sorted(BASKETBALL_CLASS_NAMES.items())
+                if counts_by_class.get(index, 0) == 0
+            ],
+            "jersey_number_count": len(jersey_numbers),
+            "jersey_numbers_file": JERSEY_NUMBERS_FILENAME,
             "skipped_unclear_count": skipped_unclear_count,
             "skipped_invalid_bbox_count": skipped_invalid_bbox_count,
             "skipped_missing_image_count": skipped_missing_image_count,
+            "skipped_invalid_class_count": skipped_invalid_class_count,
+            "skipped_invalid_number_count": skipped_invalid_number_count,
             "split_quality": split_quality,
             "warnings": warnings,
             "source_data_fingerprint": fingerprint,
@@ -724,7 +969,9 @@ def build_dataset_version(db: Session, *, version_name: str, description: str | 
             "warnings": warnings,
         }
 
-        _, _, manifest_path, metadata_path = _write_version_files(dataset_root, manifest, metadata, split_report)
+        _, _, manifest_path, metadata_path = _write_version_files(
+            dataset_root, manifest, metadata, split_report, jersey_numbers
+        )
         validation_result = validate_dataset_version(dataset_root, split_strategy)
         split_report["leakage_validation_results"] = validation_result
         (dataset_root / "split_report.json").write_text(json.dumps(split_report, ensure_ascii=False, indent=2), encoding="utf-8")

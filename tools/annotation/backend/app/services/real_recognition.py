@@ -12,7 +12,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.dataset import JerseyPrediction, VideoAsset, VideoFrame
+from app.models.dataset import PREDICTION_SOURCE_REAL, JerseyPrediction, VideoAsset, VideoFrame
 
 
 FACE_CLUSTER_THRESHOLD = 0.4
@@ -274,6 +274,7 @@ class RealJerseyRecognizer:
                         jersey_bbox=json.dumps(jersey_bbox),
                         predicted_number=predicted_number,
                         confidence=round(confidence, 3),
+                        source=PREDICTION_SOURCE_REAL,
                     )
                 )
                 temp_track_map[temp_id] = len(predictions) - 1

@@ -8,7 +8,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.dataset import JerseyPrediction, VideoAsset, VideoFrame
+from app.models.dataset import PREDICTION_SOURCE_YOLO, JerseyPrediction, VideoAsset, VideoFrame
 
 
 class YoloPreannotationError(RuntimeError):
@@ -104,6 +104,7 @@ class YoloPreannotator:
                         jersey_bbox=json.dumps(jersey_bbox),
                         predicted_number="",
                         confidence=round(float(player_confs[index]) if index < len(player_confs) else 0.0, 3),
+                        source=PREDICTION_SOURCE_YOLO,
                     )
                 )
             next_track_id += len(player_bboxes)

@@ -6,6 +6,7 @@ import {
   exportInternalDataset,
   fetchAnnotationProgress,
   fetchAnnotations,
+  fetchBasketballClasses,
   fetchRecognitionSummary,
   fetchReviewItems,
   fetchVideos,
@@ -17,6 +18,18 @@ import {
 } from './api/client'
 
 const buildApiUrl = (path) => (API_BASE_URL ? `${API_BASE_URL}${path}` : path)
+
+// Box outline colours, keyed by class NAME rather than index so appending a
+// class upstream cannot silently repaint an existing one.
+const CLASS_COLORS = {
+  player: '#4ade80',
+  ball: '#fbbf24',
+  rim: '#f87171',
+  jersey: '#60a5fa',
+  referee: '#c084fc',
+}
+const FALLBACK_CLASS_COLOR = '#e5e7eb'
+const classColor = (name) => CLASS_COLORS[name] || FALLBACK_CLASS_COLOR
 
 export default function App() {
   const [videos, setVideos] = useState([])
@@ -37,15 +50,30 @@ export default function App() {
   const [jobState, setJobState] = useState(null)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  // --- 5-class annotation state ---
+  const [classScheme, setClassScheme] = useState(null)
+  const [classId, setClassId] = useState(null)
+  const [trackId, setTrackId] = useState('0')
+  // annotation_id of the saved box being edited; null means "drawing a new box"
+  const [editingAnnotationId, setEditingAnnotationId] = useState(null)
+  const [mockWarning, setMockWarning] = useState('')
   const mountedRef = useRef(true)
   const imageFrameRef = useRef(null)
   const interactionRef = useRef(null)
   const currentItemRef = useRef(null)
   const editorBBoxRef = useRef(null)
 
-  const annotationKey = (videoId, predictionId) => `${String(videoId)}:${String(predictionId)}`
-
   const describeError = (err) => err?.responseText || err?.message || String(err)
+
+  const numberBearingClassId = classScheme?.number_bearing_class_id ?? null
+  const isJerseyClass = classId !== null && classId === numberBearingClassId
+  // Only player and jersey boxes identify a person, so only they need a track
+  // id. It is what dataset_versioning groups on to keep one player's frames on
+  // one side of the train/val split.
+  const identityClassNames = ['player', 'jersey']
+  const currentClassName =
+    classScheme?.classes?.find((item) => item.id === classId)?.name ?? ''
+  const needsTrackId = identityClassNames.includes(currentClassName)
 
   const defaultBBoxForItem = (item) => {
     const width = item?.image_width || 640
@@ -106,6 +134,7 @@ export default function App() {
       const items = Array.isArray(response?.items) ? response.items : []
       setReviewItems(items)
       setReviewIndex(0)
+      setMockWarning(response?.mock_data_warning || '')
       setMessage(response?.message || (items.length > 0 ? 'Frames loaded for annotation.' : 'No frames available for annotation.'))
       await loadSavedAnnotations(videoId)
       await loadProgress(videoId)
@@ -119,6 +148,16 @@ export default function App() {
 
   useEffect(() => {
     loadVideos()
+    // The class list comes from the backend, which reads
+    // basketball-v2/train/basketball.yaml. If this fails the UI stays disabled
+    // rather than falling back to a guessed list: annotating against the wrong
+    // class ids produces a dataset that is silently, unfixably mislabelled.
+    fetchBasketballClasses()
+      .then((scheme) => {
+        setClassScheme(scheme)
+        setClassId((current) => (current === null ? scheme.classes?.[0]?.id ?? null : current))
+      })
+      .catch((err) => setError(`Cannot load the class scheme: ${describeError(err)}`))
     return () => {
       mountedRef.current = false
     }
@@ -140,6 +179,12 @@ export default function App() {
   }, [selectedVideoId])
 
   const currentItem = reviewItems[reviewIndex] ?? null
+  // Every box already saved on this frame, of any class. The frame can hold
+  // many: several players, a ball, a rim, referees.
+  const savedBoxes = currentItem?.saved_boxes ?? []
+  const editingBox = editingAnnotationId
+    ? savedBoxes.find((box) => box.annotation_id === editingAnnotationId) || null
+    : null
   const currentAnnotation = currentItem
     ? savedAnnotations.find(
         (row) => Number(row.video_id) === Number(currentItem.video_id) && Number(row.prediction_id) === Number(currentItem.prediction_id),
@@ -154,17 +199,33 @@ export default function App() {
     editorBBoxRef.current = editorBBox
   }, [editorBBox])
 
+  // Moving to another frame always drops back to "drawing a new box", so an
+  // edit started on one frame cannot silently continue on the next.
+  useEffect(() => {
+    setEditingAnnotationId(null)
+  }, [reviewIndex, selectedVideoId])
+
   useEffect(() => {
     if (!currentItem) {
       setEditorBBox(null)
       setCorrectedNumber('')
       setLabelStatus('correct')
+      setTrackId('0')
       return
     }
-    setEditorBBox(currentAnnotation?.corrected_bbox ?? currentItem.jersey_bbox ?? defaultBBoxForItem(currentItem))
-    setCorrectedNumber(currentAnnotation?.corrected_number ?? currentItem.predicted_number ?? '')
-    setLabelStatus(currentAnnotation?.label_status ?? 'correct')
-  }, [currentItem, currentAnnotation])
+    if (editingBox) {
+      setEditorBBox(editingBox.corrected_bbox)
+      setCorrectedNumber(editingBox.corrected_number ?? '')
+      setLabelStatus(editingBox.label_status ?? 'correct')
+      setClassId(editingBox.class_id)
+      setTrackId(String(editingBox.track_id ?? 0))
+      return
+    }
+    setEditorBBox(currentItem.jersey_bbox ?? defaultBBoxForItem(currentItem))
+    setCorrectedNumber(currentItem.predicted_number ?? '')
+    setLabelStatus('correct')
+    setTrackId(String(currentItem.track_id ?? 0))
+  }, [currentItem, editingBox])
 
   useEffect(() => {
     const onMove = (event) => {
@@ -267,23 +328,31 @@ export default function App() {
 
   const validateAnnotation = () => {
     if (!currentItem || !editorBBox) return 'No frame selected.'
+    if (classId === null) return 'Class scheme not loaded yet.'
     const [x1, y1, x2, y2] = editorBBox
     if (x1 >= x2 || y1 >= y2) return 'BBox is invalid.'
-    if (labelStatus !== 'unclear' && !correctedNumber.trim()) return 'Please enter jersey number or choose unclear.'
+    // The number belongs to the jersey class only. Every other class stores no
+    // number at all, so requiring one would be nonsense.
+    if (isJerseyClass && labelStatus !== 'unclear' && !correctedNumber.trim()) {
+      return 'Enter the jersey number, or set label status to "unclear" if it is not readable.'
+    }
     return ''
   }
 
   const buildAnnotationPayload = () => ({
-    prediction_id: currentItem.prediction_id,
+    // A negative prediction_id tells the backend this is a hand-drawn box; it
+    // then allocates a unique id so the frame can hold as many boxes as needed.
+    prediction_id: editingBox ? editingBox.prediction_id : -(Number(currentItem.frame_id) + 1),
     video_id: currentItem.video_id,
     frame_id: currentItem.frame_id,
-    track_id: currentItem.track_id,
+    track_id: needsTrackId ? Number(trackId) || 0 : 0,
+    class_id: classId,
     image_path: currentItem.frame_path || '',
     image_url: currentItem.image_url || '',
     original_bbox: currentItem.jersey_bbox || defaultBBoxForItem(currentItem),
     corrected_bbox: editorBBox,
     original_number: currentItem.predicted_number || '',
-    corrected_number: labelStatus === 'unclear' ? '' : correctedNumber,
+    corrected_number: isJerseyClass && labelStatus !== 'unclear' ? correctedNumber : '',
     label_status: labelStatus,
     image_width: currentItem.image_width,
     image_height: currentItem.image_height,
@@ -293,6 +362,11 @@ export default function App() {
     if (!selectedVideoId) return
     await loadSavedAnnotations(selectedVideoId)
     await loadProgress(selectedVideoId)
+    // Re-fetch review items so saved_boxes reflects the box just written.
+    const response = await fetchReviewItems(selectedVideoId)
+    const items = Array.isArray(response?.items) ? response.items : []
+    setReviewItems(items)
+    setMockWarning(response?.mock_data_warning || '')
   }
 
   const handleSave = async () => {
@@ -304,19 +378,21 @@ export default function App() {
     setSavingAnnotation(true)
     setError('')
     try {
-      if (currentAnnotation) {
-        await updateAnnotation(currentAnnotation.annotation_id, {
+      if (editingBox) {
+        await updateAnnotation(editingBox.annotation_id, {
           corrected_bbox: editorBBox,
-          corrected_number: labelStatus === 'unclear' ? '' : correctedNumber,
+          class_id: classId,
+          corrected_number: isJerseyClass && labelStatus !== 'unclear' ? correctedNumber : '',
           label_status: labelStatus,
           image_width: currentItem.image_width,
           image_height: currentItem.image_height,
         })
-        setMessage('Annotation updated.')
+        setMessage(`Box ${editingBox.annotation_id} updated.`)
       } else {
         await saveAnnotation(buildAnnotationPayload())
-        setMessage('Annotation saved.')
+        setMessage(`New ${currentClassName} box saved.`)
       }
+      setEditingAnnotationId(null)
       await reloadAnnotationState()
     } catch (err) {
       setError(describeError(err))
@@ -325,19 +401,29 @@ export default function App() {
     }
   }
 
-  const handleDelete = async () => {
-    if (!currentAnnotation) return
+  const handleDelete = async (annotationId) => {
+    const targetId = annotationId ?? editingBox?.annotation_id
+    if (!targetId) return
     setSavingAnnotation(true)
     setError('')
     try {
-      await deleteAnnotation(currentAnnotation.annotation_id)
-      setMessage('Annotation deleted.')
+      await deleteAnnotation(targetId)
+      setMessage(`Box ${targetId} deleted.`)
+      if (editingAnnotationId === targetId) setEditingAnnotationId(null)
       await reloadAnnotationState()
     } catch (err) {
       setError(describeError(err))
     } finally {
       setSavingAnnotation(false)
     }
+  }
+
+  const startNewBox = () => {
+    setEditingAnnotationId(null)
+    setCorrectedNumber('')
+    setLabelStatus('correct')
+    setEditorBBox(currentItem ? defaultBBoxForItem(currentItem) : null)
+    setMessage('Drawing a new box. Pick its class, drag and resize, then save.')
   }
 
   const handleDownload = async () => {
@@ -362,10 +448,22 @@ export default function App() {
 
   const selectedVideo = videos.find((video) => String(video.video_id ?? video.id) === selectedVideoId)
   const imageUrl = currentItem?.image_url ? buildApiUrl(currentItem.image_url) : ''
-  const jerseyBoxStyle = useMemo(() => {
-    if (!currentItem) return {}
-    const bbox = currentItem.jersey_bbox || defaultBBoxForItem(currentItem)
+
+  const boxToPercentStyle = (bbox) => {
+    const width = currentItem?.image_width || 1
+    const height = currentItem?.image_height || 1
     const [x1, y1, x2, y2] = bbox
+    return {
+      left: `${(x1 / width) * 100}%`,
+      top: `${(y1 / height) * 100}%`,
+      width: `${((x2 - x1) / width) * 100}%`,
+      height: `${((y2 - y1) / height) * 100}%`,
+    }
+  }
+
+  const jerseyBoxStyle = useMemo(() => {
+    if (!currentItem?.jersey_bbox) return null
+    const [x1, y1, x2, y2] = currentItem.jersey_bbox
     const width = currentItem.image_width || 1
     const height = currentItem.image_height || 1
     return {
@@ -379,10 +477,35 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="hero">
-        <p className="eyebrow">RA Annotation Tool</p>
+        <p className="eyebrow">basketball-v2 Annotation Tool</p>
         <h1>jersey-active-learning</h1>
-        <p className="subcopy">Upload video, run YOLO pre-annotation, manually correct bbox and jersey number, then download the corrected dataset.</p>
+        <p className="subcopy">
+          Upload video, extract frames, draw boxes for the {classScheme?.class_count ?? 5} basketball
+          classes, then export a YOLO dataset split by video.
+        </p>
+        {classScheme ? (
+          <p className="subcopy">
+            Classes from <code>{classScheme.source_of_truth}</code>:{' '}
+            {classScheme.classes.map((item) => (
+              <span key={item.id} style={{ color: classColor(item.name), marginRight: '0.75rem' }}>
+                {item.id}={item.name}
+              </span>
+            ))}
+          </p>
+        ) : (
+          <p className="error-text">Class scheme not loaded - annotation is disabled.</p>
+        )}
       </header>
+
+      {mockWarning ? (
+        <section
+          className="card"
+          style={{ border: '2px solid #f87171', background: 'rgba(248,113,113,0.12)' }}
+        >
+          <h2 style={{ color: '#f87171', marginTop: 0 }}>MOCK DATA IN VIEW</h2>
+          <p>{mockWarning}</p>
+        </section>
+      ) : null}
 
       <section className="card upload-card">
         <label className="upload-label">
@@ -455,19 +578,51 @@ export default function App() {
             <div className="candidate-stage">
               <div className="image-frame" ref={imageFrameRef}>
                 <img src={imageUrl} alt={`Frame ${currentItem.frame_id}`} />
-                <div className="jersey-box" style={jerseyBoxStyle} />
+                {/* The pre-annotation box, shown only when one exists and it is
+                    not mock. A mock box is not evidence of anything and drawing
+                    it invites the annotator to trust it. */}
+                {jerseyBoxStyle && !currentItem.is_mock_prediction ? (
+                  <div className="jersey-box" style={jerseyBoxStyle} />
+                ) : null}
+
+                {/* Every box already saved on this frame, coloured by class.
+                    Click one to edit it. */}
+                {savedBoxes
+                  .filter((box) => box.annotation_id !== editingAnnotationId)
+                  .map((box) => (
+                    <div
+                      key={box.annotation_id}
+                      style={{
+                        ...boxToPercentStyle(box.corrected_bbox),
+                        position: 'absolute',
+                        border: `2px solid ${classColor(box.class_name)}`,
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => setEditingAnnotationId(box.annotation_id)}
+                      title={`Click to edit ${box.class_name} box ${box.annotation_id}`}
+                    >
+                      <span
+                        className="bbox-label"
+                        style={{ background: classColor(box.class_name), color: '#111' }}
+                      >
+                        {box.class_name}
+                        {box.corrected_number ? ` #${box.corrected_number}` : ''}
+                      </span>
+                    </div>
+                  ))}
+
                 {editorBBox ? (
                   <div
                     className="editable-jersey-box"
                     style={{
-                      left: `${(editorBBox[0] / (currentItem.image_width || 1)) * 100}%`,
-                      top: `${(editorBBox[1] / (currentItem.image_height || 1)) * 100}%`,
-                      width: `${((editorBBox[2] - editorBBox[0]) / (currentItem.image_width || 1)) * 100}%`,
-                      height: `${((editorBBox[3] - editorBBox[1]) / (currentItem.image_height || 1)) * 100}%`,
+                      ...boxToPercentStyle(editorBBox),
+                      borderColor: classColor(currentClassName),
                     }}
                     onMouseDown={(event) => startBBoxInteraction('drag', event)}
                   >
-                    <span className="bbox-label">Edit</span>
+                    <span className="bbox-label">
+                      {editingBox ? `Editing ${currentClassName}` : `New ${currentClassName}`}
+                    </span>
                     <button type="button" className="bbox-resize-handle" onMouseDown={(event) => startBBoxInteraction('resize', event)} aria-label="Resize bbox" />
                   </div>
                 ) : null}
@@ -476,16 +631,112 @@ export default function App() {
 
             <div className="candidate-meta">
               <p><strong>Frame:</strong> {currentItem.frame_id}</p>
-              <p><strong>Track:</strong> {currentItem.track_id}</p>
-              <p><strong>Predicted Number:</strong> {currentItem.predicted_number || '(empty)'}</p>
-              <p><strong>Confidence:</strong> {currentItem.confidence}</p>
-              <p><strong>Source:</strong> {currentItem.prediction_id < 0 ? 'Manual frame annotation' : 'YOLO pre-annotation'}</p>
               <p><strong>Item:</strong> {reviewIndex + 1} / {reviewItems.length}</p>
+              <p>
+                <strong>Pre-annotation:</strong>{' '}
+                {currentItem.is_mock_prediction ? (
+                  <span style={{ color: '#f87171', fontWeight: 700 }}>
+                    MOCK ({currentItem.prediction_source}) - invented, not detected
+                  </span>
+                ) : (
+                  currentItem.prediction_source || 'manual'
+                )}
+              </p>
+              {currentItem.prediction_id >= 0 && !currentItem.is_mock_prediction ? (
+                <p>
+                  <strong>Predicted number:</strong> {currentItem.predicted_number || '(empty)'}{' '}
+                  <strong>conf:</strong> {currentItem.confidence}
+                </p>
+              ) : null}
+
+              <p><strong>Boxes on this frame:</strong> {savedBoxes.length}</p>
+              <ul className="saved-box-list">
+                {savedBoxes.map((box) => (
+                  <li key={box.annotation_id}>
+                    <button
+                      type="button"
+                      onClick={() => setEditingAnnotationId(box.annotation_id)}
+                      style={{
+                        borderLeft: `6px solid ${classColor(box.class_name)}`,
+                        fontWeight: box.annotation_id === editingAnnotationId ? 700 : 400,
+                      }}
+                    >
+                      {box.class_name}
+                      {box.corrected_number ? ` #${box.corrected_number}` : ''}
+                      {box.track_id ? ` (track ${box.track_id})` : ''}
+                      {box.label_status !== 'correct' ? ` [${box.label_status}]` : ''}
+                    </button>
+                    <button type="button" onClick={() => handleDelete(box.annotation_id)} disabled={savingAnnotation}>
+                      delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+
+              <button type="button" onClick={startNewBox} disabled={!classScheme}>
+                + Add another box
+              </button>
+
+              <hr />
+              <p>
+                <strong>{editingBox ? `Editing box ${editingBox.annotation_id}` : 'New box'}</strong>
+              </p>
 
               <label className="annotation-field">
-                <span>Corrected jersey number</span>
-                <input type="text" value={correctedNumber} onChange={(event) => setCorrectedNumber(event.target.value)} disabled={labelStatus === 'unclear'} />
+                <span>Class</span>
+                <select
+                  value={classId ?? ''}
+                  onChange={(event) => setClassId(Number(event.target.value))}
+                  disabled={!classScheme}
+                >
+                  {(classScheme?.classes ?? []).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.id} - {item.name}
+                    </option>
+                  ))}
+                </select>
               </label>
+
+              {needsTrackId ? (
+                <label className="annotation-field">
+                  <span>Track id (same player = same id)</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={trackId}
+                    onChange={(event) => setTrackId(event.target.value)}
+                  />
+                  <small>
+                    0 means "unassigned". Only needed for split_strategy=track; splitting by
+                    video works without it.
+                  </small>
+                </label>
+              ) : null}
+
+              {/* The number is NOT a class and never enters a YOLO label file.
+                  It is exported to jersey_numbers.json as OCR ground truth. */}
+              {isJerseyClass ? (
+                <label className="annotation-field">
+                  <span>Jersey number (0-99, OCR ground truth)</span>
+                  <input
+                    type="text"
+                    value={correctedNumber}
+                    onChange={(event) => setCorrectedNumber(event.target.value)}
+                    disabled={labelStatus === 'unclear'}
+                  />
+                  <small>
+                    Normalized by {classScheme?.jersey_number_rule}. Not a detection class -
+                    exported separately to jersey_numbers.json.
+                  </small>
+                </label>
+              ) : (
+                <p>
+                  <small>
+                    No number field: only the{' '}
+                    {classScheme?.number_bearing_class_name ?? 'jersey'} class carries one.
+                  </small>
+                </p>
+              )}
 
               <label className="annotation-field">
                 <span>Label status</span>
@@ -493,14 +744,18 @@ export default function App() {
                   <option value="correct">correct</option>
                   <option value="wrong_bbox">wrong_bbox</option>
                   <option value="wrong_number">wrong_number</option>
-                  <option value="unclear">unclear</option>
+                  <option value="unclear">unclear (excluded from export)</option>
                 </select>
               </label>
 
-              <button type="button" onClick={handleSave} disabled={savingAnnotation || !editorBBox}>
-                {savingAnnotation ? 'Saving...' : currentAnnotation ? 'Update Annotation' : 'Save Annotation'}
+              <button type="button" onClick={handleSave} disabled={savingAnnotation || !editorBBox || !classScheme}>
+                {savingAnnotation ? 'Saving...' : editingBox ? 'Update Box' : 'Save New Box'}
               </button>
-              {currentAnnotation ? <button type="button" onClick={handleDelete} disabled={savingAnnotation}>{savingAnnotation ? 'Deleting...' : 'Delete Annotation'}</button> : null}
+              {editingBox ? (
+                <button type="button" onClick={() => setEditingAnnotationId(null)} disabled={savingAnnotation}>
+                  Cancel edit
+                </button>
+              ) : null}
 
               <div className="nav-row">
                 <button type="button" onClick={() => setReviewIndex((idx) => Math.max(0, idx - 1))} disabled={reviewIndex === 0}>Previous</button>
