@@ -63,14 +63,34 @@ class RimRender:
 
 
 @dataclass
+class RefereeRender:
+    """A referee box, for output 1 ONLY.
+
+    Carries no track id and no court position, because referees are neither
+    tracked nor projected. It exists so the class is visible: a class whose
+    output is never drawn is a class nobody can tell is working, and "the
+    detector is quietly filing referees as players" stays invisible until a
+    referee turns up credited with a basket in output 3.
+    """
+
+    bbox_xyxy: list[float]
+    conf: float = 0.0
+
+
+@dataclass
 class FrameRenderData:
-    """The single per-frame structure shared by both renderers."""
+    """The single per-frame structure shared by both renderers.
+
+    ``referees`` is consumed by the annotated view only. It is deliberately
+    absent from the top-down renderer: referees are not on the court model.
+    """
 
     frame_idx: int
     timestamp_sec: float
     players: list[PlayerRender] = field(default_factory=list)
     ball: Optional[BallRender] = None
     rims: list[RimRender] = field(default_factory=list)
+    referees: list[RefereeRender] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -347,6 +367,10 @@ TEAM_COLOR: dict[Optional[int], tuple[int, int, int]] = {
 }
 BALL_COLOR: tuple[int, int, int] = (0, 140, 255)
 RIM_COLOR: tuple[int, int, int] = (60, 220, 255)
+#: Magenta (BGR). Chosen to be unmistakable against TEAM_COLOR's green/blue/grey
+#: at a glance: the entire point of drawing referees is spotting the moment the
+#: detector confuses one with a player, which a similar colour would hide.
+REFEREE_COLOR: tuple[int, int, int] = (200, 60, 200)
 
 
 def render_annotated_frame(
@@ -384,6 +408,28 @@ def render_annotated_frame(
             cv2.FONT_HERSHEY_SIMPLEX,
             0.52,
             color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    # Referees are drawn HERE AND NOWHERE ELSE. This is the only consumer of the
+    # class in the whole pipeline: it is excluded from tracking, jersey OCR,
+    # possession, shot attribution, output 2 and output 3. Drawing it is what
+    # makes "the detector is calling referees players" a visible failure instead
+    # of a silent one, so if this loop is ever deleted the class goes blind.
+    for referee in data.referees:
+        bbox = referee.bbox_xyxy
+        if not bbox:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        cv2.rectangle(out, (x1, y1), (x2, y2), REFEREE_COLOR, line_width)
+        cv2.putText(
+            out,
+            "referee",
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            REFEREE_COLOR,
             2,
             cv2.LINE_AA,
         )

@@ -100,11 +100,18 @@ class TrackedObject:
 class FrameTracks:
     """Everything tracked/detected in one frame, already split by role.
 
-    There is deliberately NO ``referees`` field. CLASS_REFEREE exists so the
-    detector can tell a referee apart from a player; once that separation has
-    happened the referee has served its entire purpose and is dropped. Adding a
-    field here would invite a downstream consumer, which is precisely what the
-    class is designed to avoid. See Tracker.update and docs/annotation_guide.md.
+    ``referees`` is RENDER-ONLY and is the single exception to the rule that
+    every field here feeds analysis. It exists so referee boxes can be drawn in
+    output 1 and visually confirmed to be separated from players. A class whose
+    output is never displayed is a class nobody can tell is working, and "the
+    detector is quietly filing referees as players" is exactly the failure that
+    stays invisible until a referee shows up credited with a basket in output 3.
+
+    NOTHING ELSE MAY CONSUME IT. Referees are excluded from tracking, jersey
+    OCR, possession, shot attribution, output 2 and output 3. Those consumers
+    all take ``players`` explicitly, so adding this field cannot leak referees
+    into them by accident - but do not pass ``referees`` to any of them.
+    See Tracker.update and docs/annotation_guide.md.
     """
 
     frame_idx: int
@@ -112,6 +119,8 @@ class FrameTracks:
     players: list[TrackedObject] = field(default_factory=list)
     rims: list[TrackedObject] = field(default_factory=list)
     jerseys: list[TrackedObject] = field(default_factory=list)
+    #: RENDER-ONLY. Never tracked, never analysed. track_id is always None.
+    referees: list[TrackedObject] = field(default_factory=list)
     #: Ball comes from the dedicated nearest-neighbour tracker, never from the
     #: multi-object tracker (see BallTracker).
     ball: Optional[TrackedObject] = None
@@ -481,6 +490,12 @@ class Tracker:
         rims = [o for o in objects if o.class_id == CLASS_RIM]
         jerseys = [o for o in objects if o.class_id == CLASS_JERSEY]
         ball_candidates = [o for o in objects if o.class_id == CLASS_BALL]
+        # RENDER ONLY. Collected so referee boxes can be drawn in output 1 and
+        # visually confirmed to be separated from players - see FrameTracks.
+        # Referees are excluded from `players` above and from every consumer of
+        # it, which is the whole job of the class. Do not feed this list to
+        # tracking, jersey OCR, possession, shot attribution, or output 2/3.
+        referees = [o for o in objects if o.class_id == CLASS_REFEREE]
 
         return FrameTracks(
             frame_idx=frame_idx,
@@ -488,6 +503,7 @@ class Tracker:
             players=players,
             rims=rims,
             jerseys=jerseys,
+            referees=referees,
             ball=self.ball_tracker.update(ball_candidates),
         )
 

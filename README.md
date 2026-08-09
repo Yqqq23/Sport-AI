@@ -86,32 +86,71 @@ jersey come back empty. That is expected.
 
 ## 2. Dataset layout
 
-Ultralytics YOLO format. The dataset lives at the **repository root**, not
-inside `train/`:
+### Build it first
+
+`train/basketball.yaml` describes a dataset that does not exist on a fresh
+checkout. The only labelled data in the repo is `dataset/`, a Roboflow export in
+a different 10-class alphabetical scheme. Convert it:
+
+```bash
+python scripts/prepare_dataset.py            # refuses if the output exists
+python scripts/prepare_dataset.py --overwrite
+```
+
+It maps the 10 source classes onto these 5 **by name, never by index** (Roboflow
+renumbers alphabetically on re-export, so a positional mapping would silently
+relabel everything), refuses to run on an unknown source class, and prints a
+verification report: box counts before and after the mapping, image/label
+pairing, class-id and coordinate ranges, per-class presence in train and val,
+and a field-by-field comparison against `train/basketball.yaml`.
+
+Output:
 
 ```
 basketball-v2/
   train/
-    basketball.yaml          <- path: datasets/basketball
-  datasets/
-    basketball/
-      images/
-        train/   frame_0001.jpg  frame_0002.jpg  ...
-        val/     frame_9001.jpg  ...
-      labels/
-        train/   frame_0001.txt  frame_0002.txt  ...
-        val/     frame_9001.txt  ...
+    basketball.yaml                <- class scheme, source of truth
+    datasets/basketball/
+      data.yaml                    <- GENERATED, absolute path. Train with this
+      images/{train,val,test}/
+      labels/{train,val,test}/
 ```
 
-> **Run training from the repository root.** Ultralytics resolves a relative
-> `path:` against the **current working directory**, not against the YAML file
-> (`ultralytics/data/utils.py`: `if not path.exists() and not path.is_absolute():
-> path = (DATASETS_DIR / path).resolve()`). Launch from anywhere else and it
-> silently falls back to `~/datasets/datasets/basketball` and reports the
-> dataset as missing.
+`test/` is converted but deliberately **not referenced** by the generated
+`data.yaml`, so it cannot be spent as a tuning set by accident.
+
+### Which YAML to pass to training
+
+```bash
+python train/train.py train --data train/datasets/basketball/data.yaml
+```
+
+> **Not `train/basketball.yaml`.** Ultralytics resolves a relative `path:`
+> against its own configured **`DATASETS_DIR`** — not the working directory, and
+> not the YAML's own location (`ultralytics/data/utils.py`:
+> `path = Path(... data.get("path") ...)`, then
+> `if not path.is_absolute(): path = (DATASETS_DIR / path).resolve()`).
 >
-> If you must keep the data elsewhere, put an **absolute** path in
-> `train/basketball.yaml`, which skips the fallback entirely.
+> `DATASETS_DIR` defaults to `~/datasets` and is frequently pointed elsewhere by
+> an unrelated project — it is a global user setting, not a per-repo one. So
+> `path: datasets/basketball` lands wherever that setting says, and Ultralytics
+> reports the dataset as missing without explaining why.
+>
+> `prepare_dataset.py` therefore writes an **absolute** `path:` into the
+> generated `data.yaml` (computed at runtime, never hardcoded in source) and
+> prints, in section 7 of its report, exactly where each YAML resolves to and
+> whether the data is there. Regenerate it on each machine.
+>
+> `train/basketball.yaml` keeps its relative path so it stays machine
+> independent in version control. It remains the **source of truth for the class
+> scheme**; the generated file is verified against it field by field.
+
+Each `labels/*.txt` has one line per object, coordinates **normalised 0-1**,
+`class_id cx cy w h`:
+
+```
+0 0.4812 0.6390 0.0640 0.2210     <- player
+1 0.5121 0.3007 0.0180 0.0320     <- ball
 
 Each `labels/*.txt` has one line per object, coordinates **normalised 0-1**,
 `class_id cx cy w h`:

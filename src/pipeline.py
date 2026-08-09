@@ -34,6 +34,7 @@ from render import (
     CourtRenderConfig,
     FrameRenderData,
     PlayerRender,
+    RefereeRender,
     RimRender,
     TrailHistory,
     draw_half_court_template,
@@ -360,6 +361,14 @@ def _build_render_data(tracked, stabilizer, projector, frame_idx, timestamp_sec)
         players=players,
         ball=ball,
         rims=[RimRender(bbox_xyxy=list(r.bbox_xyxy), conf=r.confidence) for r in tracked.rims],
+        # Referees reach the annotated view and stop there. They are not
+        # projected to the court, not tracked, and not written to output 3 -
+        # note this list is built from tracked.referees, never merged into
+        # `players` above.
+        referees=[
+            RefereeRender(bbox_xyxy=list(r.bbox_xyxy), conf=r.confidence)
+            for r in tracked.referees
+        ],
     )
 
 

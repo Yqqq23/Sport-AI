@@ -29,8 +29,22 @@
 # stabilised across frames by src/jersey.py. The annotation tool records it as a
 # side-channel file (jersey_numbers.json), not as a YOLO label.
 #
-# Paths are relative to this file's directory (Ultralytics resolves `path` as
-# the dataset root). Override on the command line if your data lives elsewhere.
+# PATHS: do not train against this file directly.
+#
+# Ultralytics resolves a relative `path` against its own configured DATASETS_DIR
+# (a global user setting, default ~/datasets), NOT against this file's directory
+# and NOT against the working directory. The relative value below is kept so
+# this file stays machine independent in version control, which means it will
+# almost certainly NOT locate the data on any given machine.
+#
+# Run `python scripts/prepare_dataset.py`. It writes
+# train/datasets/basketball/data.yaml with an absolute path resolved at runtime,
+# verifies that file against the class scheme below field by field, and reports
+# where each YAML actually resolves to. Train with THAT file:
+#
+#   python train/train.py train --data train/datasets/basketball/data.yaml
+#
+# This file remains the source of truth for `nc` and `names`.
 
 path: datasets/basketball
 train: images/train

@@ -1,4 +1,8 @@
-"""Train / validate the 4-class basketball detector (player, ball, rim, jersey).
+"""Train / validate the 5-class basketball detector.
+
+Classes come from train/basketball.yaml, which is the source of truth:
+player(0), ball(1), rim(2), jersey(3), referee(4). referee is detected only so
+it can be excluded downstream - see docs/annotation_guide.md.
 
 Salvaged from:
   SRC_B/basketball_tracking_pipeline.py:37-73   -> train_basketball_detector
@@ -42,7 +46,7 @@ def train_basketball_detector(
     patience: int = 50,
     save_period: int = 10,
 ) -> Path:
-    """Train the 4-class detector.
+    """Train the 5-class detector.
 
     Args:
         data: path to basketball.yaml
@@ -136,7 +140,7 @@ def validate_model(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train / validate the basketball 4-class detector")
+    parser = argparse.ArgumentParser(description="Train / validate the basketball 5-class detector")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_train = sub.add_parser("train", help="Train the detector")

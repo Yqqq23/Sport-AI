@@ -29,6 +29,7 @@ from render import (  # noqa: E402
     CourtRenderConfig,
     FrameRenderData,
     PlayerRender,
+    RefereeRender,
     RimRender,
     TrailHistory,
     draw_half_court_template,
@@ -202,6 +203,10 @@ def main() -> int:
                     else None
                 ),
                 rims=[RimRender(bbox_xyxy=list(r.bbox_xyxy), conf=r.confidence) for r in tracked.rims],
+                referees=[
+                    RefereeRender(bbox_xyxy=list(r.bbox_xyxy), conf=r.confidence)
+                    for r in tracked.referees
+                ],
             )
 
             writer_annotated.write(render_annotated_frame(frame, render_data, line_width=2))
