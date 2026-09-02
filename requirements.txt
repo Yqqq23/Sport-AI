@@ -29,6 +29,32 @@ opencv-python>=4.8
 PyYAML>=6.0
 
 # --- Jersey number OCR ---------------------------------------------------
+# OPTION A: a Roboflow-hosted model (jersey.backend: roboflow)
+#   pip install inference-sdk          # HTTP client only
+#   pip install inference              # optional: run the model locally
+#
+# The hosted endpoint measures 2.6-6.8 s PER CROP, which is a smoke test only.
+# For a real run, serve the same model locally on the GPU box:
+#   docker run -d --gpus all -p 9001:9001 roboflow/roboflow-inference-server-gpu
+#   # then set jersey.roboflow.api_url: http://localhost:9001
+# The API key comes from $ROBOFLOW_API_KEY, never from the config file.
+#
+# OPTION B (no network, no key): INSTALL ONE OF paddleocr / easyocr. Neither is pinned here because both pull
+# a large framework (PaddlePaddle / torchvision+torch) whose correct build
+# depends on the server's CUDA, exactly like torch above.
+#
+#   pip install paddleocr     <- recommended, best on small digits
+#   pip install easyocr       <- alternative; its digit allowlist constrains
+#                                the decoder so "B"/"S"/"O" cannot be emitted
+#
+# jersey.backend defaults to "auto": paddleocr, then easyocr, then tesseract.
+#
+# TESSERACT IS THE FALLBACK, NOT THE INTENDED BACKEND. It was built for scanned
+# documents and performs badly on 25-40 px jersey digits under motion blur; it
+# also cannot report a real confidence (it returns a constant 0.7), which makes
+# the confidence-weighted voting in src/jersey.py meaningless. Kept installed so
+# a machine with neither of the above still produces something.
+#
 # Python binding only. The tesseract BINARY is a system package and is NOT
 # installed by pip:
 #   Debian/Ubuntu:  sudo apt-get install -y tesseract-ocr

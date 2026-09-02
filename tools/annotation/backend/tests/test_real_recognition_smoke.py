@@ -18,7 +18,33 @@ def _write_frame(path: Path, width: int = 640, height: int = 480) -> None:
     cv2.imwrite(str(path), image)
 
 
-def test_real_recognition_endpoint_returns_predictions_or_clear_model_error(tmp_path, monkeypatch):
+def test_real_recognition_endpoint_is_disabled(tmp_path, monkeypatch):
+    """出框路由已停用（2026-09），这里断言它真的没了。
+
+    原来的断言是「返回 200 或 400」。路由从 routes.py 摘掉之后返回 404，
+    那个断言会失败 —— 失败得对，但失败信息只会说「404 不在 {200,400} 里」，
+    看不出是有意停用还是把路由写崩了。所以把意图翻过来写明。
+
+    停用原因见 app/services/real_recognition.py 顶部：它用的是 yolov8n 的
+    COCO person 类 + 22%/16%/18%/52% 的硬编码几何，和推理时的裁剪不一致。
+    """
+    client = TestClient(app, raise_server_exceptions=False)
+    for path in (
+        "/videos/1/run-jersey-recognition",
+        "/videos/1/run-jersey-recognition-async",
+        "/videos/1/run-yolo-preannotation-async",
+        "/videos/1/run-mock-jersey-recognition",
+        "/videos/1/run-mock-jersey-recognition-async",
+        "/api/videos/1/run-jersey-recognition",
+        "/api/videos/1/run-yolo-preannotation-async",
+        "/videos/1/fixed7-dry-run",
+    ):
+        response = client.post(path)
+        assert response.status_code == 404, f"{path} 还挂在路由上: {response.status_code}"
+    assert client.get("/recognition/fixed7-check").status_code == 404
+
+
+def _unused_real_recognition_smoke(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     monkeypatch.setattr(settings, "data_dir", data_dir)
     ensure_data_dirs()

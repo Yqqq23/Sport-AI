@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -28,7 +30,35 @@ import cv2
 
 from calib import CourtProjector, load_court_calibration
 from config import AppConfig, load_config
-from jersey import JerseyNumberStabilizer, PytesseractJerseyOCR, should_run_ocr
+from identity import Identity, PlayerIdentityRegistry, SlotTracker
+from jersey import (
+    GATE_OK,
+    GATE_TOO_BLURRY,
+    GATE_TOO_SMALL,
+    JerseyNumberStabilizer,
+    crop_jersey,
+    gate_reason,
+    make_ocr_backend,
+    torso_region_from_player_box,
+)
+
+
+@dataclass(frozen=True)
+class _TorsoBox:
+    """A synthetic jersey box derived from a player box.
+
+    Duck-types the parts of ``track.TrackedObject`` that the jersey path uses
+    (``bbox_xyxy`` and ``center_xy``), so the torso fallback flows through the
+    exact same ownership / gate / crop / OCR code as a real detector box. A
+    separate code path would be a second place for the crop logic to drift.
+    """
+
+    bbox_xyxy: tuple[float, float, float, float]
+
+    @property
+    def center_xy(self) -> tuple[float, float]:
+        x1, y1, x2, y2 = self.bbox_xyxy
+        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 from render import (
     BallRender,
     CourtRenderConfig,
@@ -49,17 +79,30 @@ from track import Tracker
 LOGGER = logging.getLogger(__name__)
 
 
-def crop_bbox(frame, bbox) -> Optional["cv2.Mat"]:
-    """Crop a bbox from a frame, or None if the box is degenerate."""
-    height, width = frame.shape[:2]
-    x1, y1, x2, y2 = (int(round(v)) for v in bbox)
-    x1 = max(0, min(width - 1, x1))
-    y1 = max(0, min(height - 1, y1))
-    x2 = max(0, min(width, x2))
-    y2 = max(0, min(height, y2))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return frame[y1:y2, x1:x2]
+def _check_output_directory(output_dir: Path) -> None:
+    """Fail before inference when the output directory is not writable."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    probe = output_dir / f".write_probe_{os.getpid()}"
+    try:
+        probe.write_bytes(b"ok")
+    except OSError as exc:
+        raise RuntimeError(
+            f"Output directory is not writable: {output_dir} ({exc}). "
+            "Check `df -h`, `quota -s`, and directory permissions."
+        ) from exc
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def _open_video_writer(path: Path, fourcc: int, fps: float, size: tuple[int, int]):
+    writer = cv2.VideoWriter(str(path), fourcc, fps, size)
+    if not writer.isOpened():
+        writer.release()
+        raise RuntimeError(
+            f"Cannot create output video: {path}. The '{path.suffix}' writer or "
+            "configured codec is unavailable, or the output directory is not writable."
+        )
+    return writer
 
 
 def build_projector(config: AppConfig) -> Optional[CourtProjector]:
@@ -101,7 +144,7 @@ def run_pipeline(
         )
 
     output_dir = Path(config.output.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _check_output_directory(output_dir)
 
     capture = cv2.VideoCapture(str(input_video))
     if not capture.isOpened():
@@ -118,16 +161,36 @@ def run_pipeline(
     projector = build_projector(config)
     tracker = Tracker(weights=config.detector.weights, config=config.tracker)
     stabilizer = JerseyNumberStabilizer(config.jersey.stabilizer)
-    ocr = PytesseractJerseyOCR()
+    identities = PlayerIdentityRegistry(max_players=config.identity.max_players)
+    # Slots are assigned HERE, by position, instead of trusting the MOT backend
+    # to produce track ids. It was returning none at all, which both erased the
+    # on-screen ids and - since jersey ownership needs an owner id - discarded
+    # every jersey crop before OCR could see it.
+    slot_tracker = SlotTracker(max_players=config.identity.max_players)
+    ocr = make_ocr_backend(
+        config.jersey.backend,
+        use_gpu=config.jersey.use_gpu,
+        roboflow=config.jersey.roboflow,
+        local=config.jersey.local,
+        parseq=config.jersey.parseq,
+    )
     shot_analyzer = ShotAnalyzer(config.shot, fps=fps)
     recorder = ShotRecorder()
 
     if config.jersey.enabled and not ocr.is_available():
         LOGGER.warning(
-            "Jersey OCR is enabled but the tesseract binary was not found. "
-            "Numbers will stay unknown and output 3 will fall back to track ids. "
-            "Install tesseract-ocr, or set jersey.enabled=false to silence this."
+            "Jersey OCR is enabled but no OCR backend could be loaded "
+            "(configured: %s). Numbers will stay unknown and every output will "
+            "fall back to track ids. Fix:  pip install paddleocr   (or easyocr), "
+            "or set jersey.enabled=false to silence this.",
+            config.jersey.backend,
         )
+
+    debug_crop_dir: Optional[Path] = None
+    if config.jersey.debug_crop_dir is not None:
+        debug_crop_dir = Path(config.jersey.debug_crop_dir)
+        debug_crop_dir.mkdir(parents=True, exist_ok=True)
+        LOGGER.info("Dumping jersey crops to %s", debug_crop_dir)
 
     court_config: CourtRenderConfig = config.render.court
     court_template = draw_half_court_template(court_config)
@@ -140,19 +203,39 @@ def run_pipeline(
     annotated_path = output_dir / config.output.annotated_video_name
     topdown_path = output_dir / config.output.topdown_video_name
     writer_annotated = (
-        cv2.VideoWriter(str(annotated_path), fourcc, fps, (width, height))
+        _open_video_writer(annotated_path, fourcc, fps, (width, height))
         if config.output.write_annotated
         else None
     )
     writer_topdown = (
-        cv2.VideoWriter(str(topdown_path), fourcc, fps, (court_config.width, court_config.height))
+        _open_video_writer(
+            topdown_path, fourcc, fps, (court_config.width, court_config.height)
+        )
         if config.output.write_topdown
         else None
     )
 
     frame_idx = 0
     ocr_calls = 0
-    ocr_skipped = 0
+    ocr_hits = 0
+    #: Jersey boxes the DETECTOR produced. Zero across a whole run means the
+    #: weights have no jersey class, which silently disabled OCR entirely.
+    jersey_boxes_seen = 0
+    #: Frames that fell back to a geometric torso region instead.
+    torso_fallback_frames = 0
+    #: Player boxes that arrived with no tracker id.
+    untracked_players = 0
+    # Skips are counted BY REASON. A single combined counter (the previous
+    # "skipped by the size/blur gate") cannot tell you which threshold starved
+    # the run, which is exactly the question you have when no number locks.
+    skips = {
+        GATE_TOO_SMALL: 0,
+        GATE_TOO_BLURRY: 0,
+        "no_owner": 0,
+        "bad_crop": 0,
+        "already_locked": 0,
+        "call_budget": 0,
+    }
     started = time.perf_counter()
 
     try:
@@ -172,27 +255,101 @@ def run_pipeline(
                 and ocr.is_available()
                 and frame_idx % max(1, config.jersey.ocr_interval) == 0
             )
+            jersey_boxes_seen += len(tracked.jerseys)
+            untracked_players += sum(1 for p in tracked.players if p.track_id is None)
+
+            # Position-based slot per player box, independent of track_id.
+            # `player_slot` is the key used by the stabilizer, the identity
+            # registry and the trails from here on.
+            player_slots = slot_tracker.assign(
+                [p.bbox_xyxy for p in tracked.players], frame_idx
+            )
+            slot_of_player = {id(p): s for p, s in zip(tracked.players, player_slots)}
+
             if run_ocr_this_frame:
-                for jersey_box in tracked.jerseys:
+                # No jersey boxes from the detector: fall back to a geometric
+                # torso region per player. Weights trained without a `jersey`
+                # class otherwise make this whole loop a no-op - zero crops,
+                # zero calls, zero skips - and the summary shows nothing at all
+                # to explain why no numbers appeared.
+                jersey_sources = tracked.jerseys
+                if not jersey_sources and config.jersey.fallback_to_torso:
+                    jersey_sources = [
+                        _TorsoBox(
+                            bbox_xyxy=tuple(
+                                torso_region_from_player_box(
+                                    player.bbox_xyxy,
+                                    config.jersey.torso_top,
+                                    config.jersey.torso_bottom,
+                                    config.jersey.torso_width,
+                                )
+                            )
+                        )
+                        for player in tracked.players
+                    ]
+                    torso_fallback_frames += 1
+
+                for jersey_box in jersey_sources:
                     # Jersey ownership is resolved against tracked.players ONLY.
                     # Referees (CLASS_REFEREE) are already absent from that list
                     # by the role split in src/track.py, so a jersey box drawn on
                     # a referee can never acquire an owner and never votes. That
                     # is intended: referee numbers are not player numbers, and
                     # letting one bind would corrupt a real player's vote pool.
-                    owner = _nearest_player(jersey_box, tracked.players)
-                    if owner is None or owner.track_id is None:
+                    owner = _nearest_player(
+                        jersey_box,
+                        tracked.players,
+                        max_distance_ratio=config.jersey.owner_max_distance_ratio,
+                    )
+                    if owner is None:
+                        skips["no_owner"] += 1
                         continue
-                    crop = crop_bbox(frame, jersey_box.bbox_xyxy)
-                    if crop is None or not should_run_ocr(
-                        list(jersey_box.bbox_xyxy), config.jersey.gate, crop
+                    # Keyed on the SLOT, not owner.track_id. The old check
+                    # rejected every crop whenever the backend produced no ids,
+                    # which is why OCR never ran a single time.
+                    owner_slot = slot_of_player.get(id(owner), 0)
+                    if owner_slot == 0:
+                        skips["no_owner"] += 1
+                        continue
+
+                    # Once a number has LOCKED, further OCR on that track can
+                    # only confirm what is already known. Checked before the
+                    # crop is even cut, because with a network backend every
+                    # avoided call is seconds of wall clock.
+                    if config.jersey.skip_locked_tracks and stabilizer.is_locked(
+                        owner_slot
                     ):
-                        ocr_skipped += 1
+                        skips["already_locked"] += 1
                         continue
+
+                    if 0 < config.jersey.max_ocr_calls <= ocr_calls:
+                        skips["call_budget"] += 1
+                        continue
+
+                    # Padded + upscaled, NOT the raw detector box. See
+                    # jersey.crop_jersey for why a tight crop is the wrong input.
+                    crop = crop_jersey(frame, jersey_box.bbox_xyxy, config.jersey.gate)
+                    if crop is None:
+                        skips["bad_crop"] += 1
+                        continue
+
+                    reason = gate_reason(
+                        list(jersey_box.bbox_xyxy), config.jersey.gate, crop
+                    )
+                    if reason != GATE_OK:
+                        skips[reason] += 1
+                        continue
+
                     text, confidence = ocr.recognize(crop)
                     ocr_calls += 1
+                    if text is not None:
+                        ocr_hits += 1
+                    if debug_crop_dir is not None:
+                        _dump_crop(
+                            debug_crop_dir, crop, frame_idx, owner_slot, text, confidence
+                        )
                     stabilizer.update(
-                        track_id=owner.track_id,
+                        track_id=owner_slot,
                         raw_text=text,
                         confidence=confidence,
                         frame_idx=frame_idx,
@@ -215,9 +372,15 @@ def run_pipeline(
             )
             if event is not None:
                 if event.shooter_track_id is not None:
-                    event.shooter_jersey_number = stabilizer.get_stable_number(
-                        event.shooter_track_id
-                    )
+                    # Resolve through the identity registry, not the stabilizer
+                    # directly: the registry is sticky, so a shot taken on a
+                    # frame where OCR happened not to run is still credited to
+                    # the number that track is already known to wear.
+                    event.shooter_jersey_number = identities.resolve(
+                        event.shooter_track_id,
+                        stabilizer.get_stable_number(event.shooter_track_id),
+                        frame_idx=frame_idx,
+                    ).number
                 if projector is not None and event.shot_position_xy is not None:
                     event.court_xy = projector.project_point(*event.shot_position_xy)
                 recorder.add_event(event)
@@ -226,9 +389,11 @@ def run_pipeline(
             render_data = _build_render_data(
                 tracked=tracked,
                 stabilizer=stabilizer,
+                identities=identities,
                 projector=projector,
                 frame_idx=frame_idx,
                 timestamp_sec=timestamp_sec,
+                slot_of_player=slot_of_player,
             )
             if writer_annotated is not None:
                 writer_annotated.write(
@@ -260,22 +425,33 @@ def run_pipeline(
     elapsed = time.perf_counter() - started
     video_seconds = frame_idx / max(fps, 1e-6)
 
-    csv_path, json_path = recorder.write(
-        output_dir=output_dir,
-        stem=config.output.shots_stem,
-        meta={
-            "input_video": input_video.name,
-            "frames_processed": frame_idx,
-            "fps": round(fps, 3),
-            "tracker": tracker.backend_name,
-            "reid_active": tracker.reid_active,
-            "weights": Path(config.detector.weights).name,
-            "elapsed_sec": round(elapsed, 2),
-            "realtime_ratio": round(elapsed / video_seconds, 3) if video_seconds > 0 else None,
-            "ocr_calls": ocr_calls,
-            "ocr_skipped_by_gate": ocr_skipped,
-        },
-    )
+    try:
+        csv_path, json_path = recorder.write(
+            output_dir=output_dir,
+            stem=config.output.shots_stem,
+            meta={
+                "input_video": input_video.name,
+                "frames_processed": frame_idx,
+                "fps": round(fps, 3),
+                "tracker": tracker.backend_name,
+                "reid_active": tracker.reid_active,
+                "weights": Path(config.detector.weights).name,
+                "elapsed_sec": round(elapsed, 2),
+                "realtime_ratio": round(elapsed / video_seconds, 3) if video_seconds > 0 else None,
+                "ocr_backend": type(ocr).__name__,
+                "ocr_calls": ocr_calls,
+                "ocr_hits": ocr_hits,
+                "ocr_skipped": dict(skips),
+                "jersey_numbers": identities.confirmed_numbers(),
+            },
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"Failed to write results under {output_dir}: {exc}. "
+            "The video writer warnings immediately before this usually mean the "
+            "filesystem is full or your account quota was exceeded. Check `df -h`, "
+            "`quota -s`, and `du -sh runs outputs`."
+        ) from exc
 
     print(recorder.format_summary())
     print(f"  tracker            {tracker.backend_name} (reid={tracker.reid_active})")
@@ -286,7 +462,99 @@ def run_pipeline(
         if video_seconds > 0
         else f"  elapsed            {elapsed:.1f}s"
     )
-    print(f"  jersey OCR         {ocr_calls} run, {ocr_skipped} skipped by the size/blur gate")
+    # --- per-class detection counts -----------------------------------
+    # Printed unconditionally. A class showing 0 here is the difference between
+    # "the detector never proposed one" and "something downstream dropped it",
+    # and previously nothing in the output distinguished those.
+    from detect import BASKETBALL_CLASS_NAMES
+
+    counts = getattr(tracker, "class_detection_counts", {})
+    summary = "  ".join(
+        f"{name}={counts.get(class_id, 0)}"
+        for class_id, name in BASKETBALL_CLASS_NAMES.items()
+    )
+    print(f"  detections         {summary}")
+    if counts.get(1, 0) == 0:  # CLASS_BALL
+        print(
+            "  BALL NOT DETECTED  The detector proposed zero ball boxes. Check the\n"
+            "                     'Detector classes' line in the log: if the class\n"
+            "                     names are not player/ball/rim/jersey/referee at\n"
+            "                     indices 0-4, the weights use a different scheme and\n"
+            "                     every class is misfiled. Otherwise lower\n"
+            "                     tracker.ball_conf (currently "
+            f"{config.tracker.ball_conf})."
+        )
+
+    if identities.recycled_slots or identities.overflow_tracks:
+        print(
+            f"  roster             max={config.identity.max_players}"
+            f"  recycled={identities.recycled_slots}"
+            f"  overflow={identities.overflow_tracks}"
+        )
+
+    if untracked_players:
+        print(
+            f"  UNTRACKED PLAYERS  {untracked_players} player box(es) arrived with no\n"
+            "                     tracker id and were drawn as grey 'id:?'. The MOT\n"
+            "                     backend is not assigning ids - check that\n"
+            "                     tracker.persist is true and that the tracker\n"
+            "                     backend loaded."
+        )
+
+    print(f"  jersey boxes       {jersey_boxes_seen} from the detector")
+    if jersey_boxes_seen == 0:
+        print(
+            "  NO JERSEY CLASS    The detector produced zero jersey boxes across the\n"
+            "                     whole run, so these weights almost certainly have no\n"
+            "                     'jersey' class. This is ALSO why referees are not\n"
+            "                     separated: no referee class either.\n"
+            "                     The recognizer (PARSeq etc.) was never the problem -\n"
+            "                     it is only ever handed crops the detector locates,\n"
+            "                     so with no boxes it is simply never called.\n"
+            f"                     Torso fallback used on {torso_fallback_frames} frame(s)."
+        )
+
+    hit_rate = (100.0 * ocr_hits / ocr_calls) if ocr_calls else 0.0
+    total_skipped = sum(skips.values())
+    print(f"  jersey backend     {type(ocr).__name__}")
+    print(f"  jersey OCR         {ocr_calls} run, {ocr_hits} returned a number ({hit_rate:.0f}%)")
+    print(
+        f"  jersey skipped     {total_skipped}"
+        f"  (too_small={skips[GATE_TOO_SMALL]}"
+        f" too_blurry={skips[GATE_TOO_BLURRY]}"
+        f" no_owner={skips['no_owner']}"
+        f" bad_crop={skips['bad_crop']}"
+        f" locked={skips['already_locked']}"
+        f" budget={skips['call_budget']})"
+    )
+    numbers = identities.confirmed_numbers()
+    print(
+        f"  jersey numbers     {', '.join('#' + n for n in numbers)}"
+        if numbers
+        else "  jersey numbers     none locked"
+    )
+    # Say WHICH stage failed rather than leaving the reader to infer it from the
+    # counters. These three cases have three different fixes and are easy to
+    # confuse from the raw numbers alone.
+    if not numbers:
+        if ocr_calls == 0 and total_skipped > 0:
+            print(
+                "  DIAGNOSIS          every candidate was gated out. Lower "
+                "jersey.gate.min_box_width / min_box_height and re-run."
+            )
+        elif ocr_calls > 0 and ocr_hits == 0:
+            print(
+                "  DIAGNOSIS          OCR ran but read nothing. Set "
+                "jersey.debug_crop_dir and look at the crops: if they are "
+                "legible the backend is too weak (use paddleocr), if not the "
+                "numbers are below the resolution floor."
+            )
+        elif ocr_hits > 0:
+            print(
+                "  DIAGNOSIS          numbers were read but never reached the "
+                "vote quorum. Lower jersey.stabilizer.slot_lock_min_votes or "
+                "jersey.ocr_interval."
+            )
     if projector is None:
         print("  NOTE               no calibration, so court_x/court_y are empty")
     print()
@@ -301,12 +569,20 @@ def run_pipeline(
     return outputs
 
 
-def _nearest_player(jersey_box, players):
+def _nearest_player(jersey_box, players, max_distance_ratio: float = 0.25):
     """Attach a jersey box to the player box that contains or is nearest its centre.
 
     ``players`` never contains referees: src/track.py drops CLASS_REFEREE during
     the role split. Jersey numbers therefore bind to players only, by
     construction rather than by a check here.
+
+    The tolerance is NEW. This used to require ``distance == 0.0`` - the jersey
+    centre strictly inside the player box - which silently discarded a jersey
+    box sitting a few pixels proud of a tightly-drawn player box. Two
+    independently-regressed boxes on a ~150 px player disagree at their edges
+    routinely, so exact containment threw away usable observations and did not
+    even count them as skips. The allowance scales with the player's box height
+    so it means the same thing near and far from the camera.
     """
     if not players:
         return None
@@ -319,27 +595,70 @@ def _nearest_player(jersey_box, players):
         return (dx * dx + dy * dy) ** 0.5
 
     best = min(players, key=distance)
-    # A jersey box whose centre is outside every player box is not attachable.
-    return best if distance(best) == 0.0 else None
+    x1, y1, x2, y2 = best.bbox_xyxy
+    allowance = max(0.0, float(max_distance_ratio)) * abs(y2 - y1)
+    return best if distance(best) <= allowance else None
 
 
-def _build_render_data(tracked, stabilizer, projector, frame_idx, timestamp_sec) -> FrameRenderData:
+def _dump_crop(directory: Path, crop, frame_idx: int, track_id: int, text, confidence) -> None:
+    """Write one OCR input to disk, with the verdict encoded in the filename.
+
+    Sorting the directory by name groups every crop a track produced, so a
+    track that never locks a number can be inspected as a filmstrip. The
+    filename carries what OCR returned so "unreadable crop" and "readable crop,
+    wrong answer" are distinguishable without opening anything else.
+    """
+    verdict = f"{text}_{confidence:.2f}" if text else "none"
+    path = directory / f"f{frame_idx:06d}_t{track_id:03d}_{verdict}.png"
+    try:
+        cv2.imwrite(str(path), crop)
+    except Exception as exc:  # never let a debug aid kill a run
+        LOGGER.debug("Could not write debug crop %s: %s", path, exc)
+
+
+def _build_render_data(
+    tracked, stabilizer, identities, projector, frame_idx, timestamp_sec, slot_of_player
+) -> FrameRenderData:
     players: list[PlayerRender] = []
+    # NO DUPLICATE SLOT IN ONE FRAME. SlotTracker already assigns each box a
+    # unique slot, but the identity registry MERGES on jersey number - so if two
+    # different players are both misread as "#7" they collapse to one identity
+    # and two markers render with the same id. Whoever claims the identity first
+    # keeps it; the other falls back to its own slot for this frame.
+    claimed_identities: set[str] = set()
+    claimed_slots: set[int] = set()
     for player in tracked.players:
         court_xy = None
         if projector is not None:
             court_xy = projector.project_point(*player.ground_xy)
+        # Everything keys on the position-assigned slot; track_id is no longer
+        # trusted to exist at all.
+        slot = slot_of_player.get(id(player), 0)
+        number = stabilizer.get_stable_number(slot) if slot else None
+        # The identity, not the tracker id, is what gets drawn and what the
+        # top-down trail is keyed on. Resolving it here (once per player per
+        # frame) is what makes the label read "#7" instead of "id:23".
+        # frame_idx is REQUIRED for the roster cap: slot recycling picks the
+        # least-recently-seen identity, so without an advancing frame counter
+        # every slot looks equally fresh and nothing is ever recycled.
+        identity = identities.resolve(slot if slot else None, number, frame_idx=frame_idx)
+        if identity.key in claimed_identities or (
+            identity.slot > 0 and identity.slot in claimed_slots
+        ):
+            # Already used by another player this frame: show this one under its
+            # own slot with no number, rather than printing the same id twice.
+            identity = Identity(key=f"dup:{slot}", number=None, slot=slot)
+        claimed_identities.add(identity.key)
+        if identity.slot > 0:
+            claimed_slots.add(identity.slot)
         players.append(
             PlayerRender(
-                track_id=player.track_id if player.track_id is not None else -1,
+                track_id=slot,
                 bbox_xyxy=list(player.bbox_xyxy),
-                jersey_number=(
-                    stabilizer.get_stable_number(player.track_id)
-                    if player.track_id is not None
-                    else None
-                ),
+                jersey_number=identity.number,
                 conf=player.confidence,
                 court_xy=court_xy,
+                identity=identity,
             )
         )
 
@@ -389,6 +708,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override tracker.tracker, e.g. botsort.yaml or configs/trackers/bytetrack_sportcv.yaml",
     )
     parser.add_argument("--max-frames", type=int, default=None, help="Stop after N frames")
+    parser.add_argument(
+        "--jersey-backend",
+        default=None,
+        choices=[
+            "auto", "parseq", "local", "roboflow",
+            "paddleocr", "easyocr", "pytesseract",
+        ],
+        help="Override jersey.backend for this run",
+    )
+    parser.add_argument(
+        "--jersey-weights",
+        type=Path,
+        default=None,
+        help="Override jersey.local.weights (checkpoint from train/train_jersey.py)",
+    )
+    parser.add_argument(
+        "--roboflow-model",
+        default=None,
+        help=(
+            "Override jersey.roboflow.model_id, e.g. digits-x7d7z/10. "
+            "Format is project-slug/version; the workspace is NOT part of it."
+        ),
+    )
+    parser.add_argument(
+        "--roboflow-url",
+        default=None,
+        help=(
+            "Override jersey.roboflow.api_url. Use http://localhost:9001 to hit a "
+            "local inference server instead of the slow hosted endpoint."
+        ),
+    )
+    parser.add_argument(
+        "--dump-jersey-crops",
+        type=Path,
+        default=None,
+        help=(
+            "Write every crop handed to OCR into this directory, named with what "
+            "OCR returned. Run this FIRST when numbers are not appearing: it is "
+            "the only way to tell an unreadable crop from a failing recognizer."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     return parser
 
@@ -405,6 +765,16 @@ def main() -> None:
         config.output.output_dir = args.output_dir
     if args.max_frames is not None:
         config.max_frames = args.max_frames
+    if args.jersey_backend is not None:
+        config.jersey.backend = args.jersey_backend
+    if args.jersey_weights is not None:
+        config.jersey.local.weights = args.jersey_weights
+    if args.roboflow_model is not None:
+        config.jersey.roboflow.model_id = args.roboflow_model
+    if args.roboflow_url is not None:
+        config.jersey.roboflow.api_url = args.roboflow_url
+    if args.dump_jersey_crops is not None:
+        config.jersey.debug_crop_dir = args.dump_jersey_crops
 
     run_pipeline(input_video=args.input, config=config, tracker_override=args.tracker)
 

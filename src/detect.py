@@ -243,17 +243,18 @@ class Detector:
         Returns:
             Detections sorted by descending confidence. Never an Ultralytics object.
         """
-        results = self.model.predict(
-            frame,
-            conf=self.config.conf,
-            iou=self.config.iou,
-            imgsz=self.config.imgsz,
-            device=self.config.device,
-            half=self.config.half,
-            max_det=self.config.max_det,
-            classes=list(classes) if classes is not None else None,
-            verbose=False,
-        )
+        kwargs = {
+            "conf": self.config.conf,
+            "iou": self.config.iou,
+            "imgsz": self.config.imgsz,
+            "device": self.config.device,
+            "max_det": self.config.max_det,
+            "classes": list(classes) if classes is not None else None,
+            "verbose": False,
+        }
+        if self.config.half:
+            kwargs["half"] = True
+        results = self.model.predict(frame, **kwargs)
         return self._to_detections(results)
 
     @staticmethod

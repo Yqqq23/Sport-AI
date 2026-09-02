@@ -10,8 +10,6 @@ import {
   fetchRecognitionSummary,
   fetchReviewItems,
   fetchVideos,
-  pollJob,
-  runYoloPreannotationAsync,
   saveAnnotation,
   updateAnnotation,
   uploadVideo,
@@ -45,9 +43,9 @@ export default function App() {
   const [correctedNumber, setCorrectedNumber] = useState('')
   const [labelStatus, setLabelStatus] = useState('correct')
   const [savingAnnotation, setSavingAnnotation] = useState(false)
-  const [runningPreannotation, setRunningPreannotation] = useState(false)
   const [exportingDataset, setExportingDataset] = useState(false)
-  const [jobState, setJobState] = useState(null)
+  // jobState 删于 2026-09：网页不再启动任何后台任务（唯一那个是 YOLO 预标注），
+  // 出框改在 basketball-v2 侧离线跑，进度看那边的命令行输出。
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   // --- 5-class annotation state ---
@@ -75,15 +73,22 @@ export default function App() {
     classScheme?.classes?.find((item) => item.id === classId)?.name ?? ''
   const needsTrackId = identityClassNames.includes(currentClassName)
 
-  const defaultBBoxForItem = (item) => {
-    const width = item?.image_width || 640
-    const height = item?.image_height || 480
-    return [
-      Math.round(width * 0.35),
-      Math.round(height * 0.2),
-      Math.round(width * 0.65),
-      Math.round(height * 0.5),
-    ]
+  // defaultBBoxForItem() 删于 2026-09。它按整帧的 35%–65% / 20%–50% 返回一个
+  // 和球员位置毫无关系的固定矩形（1920×1080 上是 576×324 px），用作
+  // jersey_bbox 缺失时的兜底。人对着那个框调出来的东西既不是检测结果、也不是
+  // 干净的手工标注，只是给数据集掺沙子。
+  //
+  // 现在没有框的条目根本不进队列（后端 list_review_items 直接跳过），
+  // 所以不需要兜底。手动新建框改为从当前条目的球衣框偏移出来（seedBoxFrom），
+  // 那至少是一个和这个球员真实位置有关的起点。
+
+  // 新建框的起点：把当前框整体挪开一点，避免和原框完全重叠导致看不出是两个。
+  const seedBoxFrom = (bbox) => {
+    if (!bbox) return null
+    const [x1, y1, x2, y2] = bbox
+    const dx = Math.max(8, Math.round((x2 - x1) * 0.25))
+    const dy = Math.max(8, Math.round((y2 - y1) * 0.25))
+    return [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
   }
 
   const loadVideos = async () => {
@@ -221,7 +226,9 @@ export default function App() {
       setTrackId(String(editingBox.track_id ?? 0))
       return
     }
-    setEditorBBox(currentItem.jersey_bbox ?? defaultBBoxForItem(currentItem))
+    // 没有 jersey_bbox 就不给框。后端已经把这类条目挡在队列外了，这里是
+    // 第二道 —— 宁可editor 空着，也不要凭空造一个框让人以为那是识别结果。
+    setEditorBBox(currentItem.jersey_bbox ?? null)
     setCorrectedNumber(currentItem.predicted_number ?? '')
     setLabelStatus('correct')
     setTrackId(String(currentItem.track_id ?? 0))
@@ -297,34 +304,15 @@ export default function App() {
     }
   }
 
-  const handleRunPreannotation = async () => {
-    if (!selectedVideoId) return
-    setRunningPreannotation(true)
-    setError('')
-    setMessage('YOLO pre-annotation queued...')
-    try {
-      const queued = await runYoloPreannotationAsync(selectedVideoId)
-      const finalJob = await pollJob(queued.job_id, {
-        interval: 1000,
-        onUpdate: (job) => {
-          if (!mountedRef.current) return
-          setJobState(job)
-        },
-      })
-      if (!finalJob) return
-      setJobState(finalJob)
-      if (finalJob.status === 'completed') {
-        setMessage(finalJob.message || 'YOLO pre-annotation completed.')
-        await loadReviewFrames(selectedVideoId)
-      } else {
-        setError(finalJob.error_message || finalJob.message || 'YOLO pre-annotation failed.')
-      }
-    } catch (err) {
-      setError(describeError(err))
-    } finally {
-      setRunningPreannotation(false)
-    }
-  }
+  // handleRunPreannotation() 删于 2026-09，连同 "Run YOLO Pre-annotation" 按钮。
+  //
+  // 它调的是后端的 yolo_preannotation：通用 yolov8n 的 COCO person 类 +
+  // 25%/15%/25%/45% 的硬编码球衣框，和推理时真正用的裁剪 IoU 只有 0.625。
+  // 这是这个工具里唯一在跑的出框链路，也正是训练/推理不一致的来源。
+  //
+  // 框现在由 basketball-v2 的 jersey_train mine 产出（它直接调 src/jersey.py
+  // 的 crop_jersey / torso_region_from_player_box，和推理逐像素同源），
+  // 经 scripts/import_crops.py 导入。网页只负责人工标注，不再自己出框。
 
   const validateAnnotation = () => {
     if (!currentItem || !editorBBox) return 'No frame selected.'
@@ -349,7 +337,8 @@ export default function App() {
     class_id: classId,
     image_path: currentItem.frame_path || '',
     image_url: currentItem.image_url || '',
-    original_bbox: currentItem.jersey_bbox || defaultBBoxForItem(currentItem),
+    // 手画的框没有「原始框」可言，此时 original_bbox 就等于人画的那个。
+    original_bbox: currentItem.jersey_bbox || editorBBox,
     corrected_bbox: editorBBox,
     original_number: currentItem.predicted_number || '',
     corrected_number: isJerseyClass && labelStatus !== 'unclear' ? correctedNumber : '',
@@ -422,7 +411,7 @@ export default function App() {
     setEditingAnnotationId(null)
     setCorrectedNumber('')
     setLabelStatus('correct')
-    setEditorBBox(currentItem ? defaultBBoxForItem(currentItem) : null)
+    setEditorBBox(seedBoxFrom(editorBBox ?? currentItem?.jersey_bbox))
     setMessage('Drawing a new box. Pick its class, drag and resize, then save.')
   }
 
@@ -546,12 +535,9 @@ export default function App() {
             <h2>Simple Annotation Mode</h2>
             {selectedVideo ? <p className="selected-video-line">Selected: {selectedVideo.original_filename ?? selectedVideo.filename}</p> : null}
             {annotationProgress ? <p className="annotation-progress-line">Annotation Progress: {annotationProgress.annotated_count} / {annotationProgress.total_candidates} annotated ({annotationProgress.progress_percent}%)</p> : null}
-            {recognitionSummary ? <p className="selected-video-line">YOLO Summary: {recognitionSummary.prediction_count} pre-annotations, average confidence {recognitionSummary.average_confidence}</p> : null}
+            {recognitionSummary ? <p className="selected-video-line">Imported crops: {recognitionSummary.prediction_count} boxes from basketball-v2 mine</p> : null}
           </div>
           <div className="action-row">
-            <button type="button" onClick={handleRunPreannotation} disabled={!selectedVideoId || runningPreannotation}>
-              {runningPreannotation ? 'Running YOLO Pre-annotation...' : 'Run YOLO Pre-annotation'}
-            </button>
             <button type="button" onClick={() => loadReviewFrames(selectedVideoId)} disabled={!selectedVideoId || loadingReviewItems}>
               {loadingReviewItems ? 'Loading Frames...' : 'Load Frames for Annotation'}
             </button>
@@ -561,13 +547,6 @@ export default function App() {
           </div>
         </div>
 
-        {jobState ? (
-          <div className="job-card">
-            <p><strong>Job Status:</strong> {jobState.status}</p>
-            <p><strong>Progress:</strong> {jobState.progress ?? 0}%</p>
-            <p><strong>Message:</strong> {jobState.message || 'Waiting...'}</p>
-          </div>
-        ) : null}
         {message ? <p className="success-text">{message}</p> : null}
         {error ? <p className="error-text">{error}</p> : null}
         {!selectedVideoId ? <p>Select a video first.</p> : null}

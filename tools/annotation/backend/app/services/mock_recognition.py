@@ -1,4 +1,15 @@
-"""FAKE jersey predictions for UI development. NOT a recognition model.
+"""[已停用 2026-09] 出框统一由 basketball-v2 的 mine 提供。
+
+两个端点（run-mock-jersey-recognition 和它的 -async 版）已从 routes.py 摘掉。
+模块保留是因为 is_mock_prediction() / PREDICTION_SOURCE_MOCK 还被 routes.py
+和 review-items 的警告横幅用着 —— 库里万一还有 source='mock' 的历史行，
+UI 必须仍然能把它认出来并警告。generate_mock_predictions() 本身已无入口。
+
+下面这段原始说明保留，它解释了为什么这个模块的输出格外危险。
+
+---
+
+FAKE jersey predictions for UI development. NOT a recognition model.
 
 READ THIS BEFORE TRUSTING ANYTHING THIS MODULE PRODUCES.
 

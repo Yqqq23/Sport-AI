@@ -18,7 +18,10 @@ detector:
   # REQUIRED. No default is provided on purpose: a wrong-but-present weights
   # path would silently produce meaningless detections. Point this at the
   # best.pt produced by train/train.py.
-  weights: ../train/runs/detect/train/basketball_baseline/weights/best.pt
+  # ABSOLUTE server path on purpose. Local and cloud checkouts store best.pt in
+  # different places, and a relative path resolved against this config file
+  # silently pointed at a non-existent local copy.
+  weights: /home/s1143757/basketball-v2/runs/detect/runs/detect/train/basketballbaseline/weight/best.pt
   conf: 0.25
   iou: 0.45
   # Must match the training imgsz. Ball and rim are small objects and lose
@@ -53,7 +56,15 @@ tracker:
   # this flag.
   # UNPROVEN FOR BASKETBALL: team-mates wear near-identical kits, so appearance
   # embeddings may barely separate them. Treat as an experiment, not a fix.
-  with_reid: false
+  # ReID only takes effect on a backend that declares a `with_reid` key.
+  # VERIFIED: botsort.yaml does; bytetrack.yaml does not. If the run logs
+  # "does not declare a 'with_reid' key", switch tracker above to botsort.yaml
+  # (or deepocsort.yaml) - otherwise this flag does nothing.
+  #
+  # NOTE it now matters far less than it used to: on-screen ids come from
+  # SlotTracker (position-based), not from the MOT backend, so ReID improves the
+  # backend's internal association but no longer changes the ids you see.
+  with_reid: true
   reid_model: auto      # "auto" reuses detector features; cheapest option
 
   persist: true         # required for cross-frame id continuity - do not disable
@@ -64,20 +75,60 @@ tracker:
   half: false
   max_det: 60
 
-  # false = one forward pass, tracker sees every class and non-player classes
-  #         are filtered out afterwards (faster; the default)
-  # true  = tracker sees only players, ball/rim/jersey come from a SECOND
-  #         forward pass (cleaner isolation, roughly double the inference cost)
-  # Run scripts/compare_trackers.py before changing this: it reports whether
-  # non-player classes are polluting track ids near the rim.
-  restrict_tracker_to_players: false
+  # true  = tracker sees ONLY players; ball/rim/jersey/referee come from a
+  #         second forward pass
+  # false = one forward pass, tracker sees every class
+  #
+  # MUST STAY TRUE. This was false and it broke two things outright - it is not
+  # a speed/quality trade-off:
+  #
+  #   1. THE BALL VANISHES. Ultralytics trackers emit only CONFIRMED tracks, and
+  #      a track is initiated only by a detection scoring >= new_track_thresh
+  #      (0.25 in bytetrack.yaml). A ball at 0.12 is demoted to a low-score
+  #      detection that can only match an EXISTING track, so it can never start
+  #      one. Lowering conf/ball_conf cannot help: the gate lives inside the
+  #      tracker. Measured: the ball appeared in 1 frame out of 400.
+  #
+  #   2. TRACK IDS INFLATE. The backend assigns ids to ball, rim AND jersey
+  #      boxes from the same counter as players. ~6 players + ~6 jerseys + rim +
+  #      ball per frame pushes ids past 80 in a few hundred frames - the "id:81"
+  #      seen on a court holding six people.
+  #
+  # Cost: a second forward pass, roughly 2x inference. Worth it.
+  restrict_tracker_to_players: true
 
   generated_tracker_dir: ../outputs/.generated_trackers
+
+  # SEPARATE, LOWER confidence for the ball class only.
+  #
+  # A basketball is the smallest thing here - a few dozen pixels, motion
+  # blurred, often half-hidden by hands - so it scores far below a player box.
+  # A single global conf tuned to keep player boxes clean deletes the ball
+  # entirely, which is exactly what happened at conf 0.25.
+  #
+  # The model runs at min(conf, ball_conf) and each class is then filtered
+  # against its own threshold, so player/rim/jersey/referee are unchanged.
+  # Raise this if false ball boxes appear; lower it if the ball is still missing.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  ball_conf: 0.10
 
   # Ball is tracked by nearest-neighbour, not by the MOT backend.
   # UNCALIBRATED, but low risk - see PART 2 notes.
   ball_max_distance: 120.0
   ball_max_lost_frames: 15
+
+# --- Roster --------------------------------------------------------------
+identity:
+  # How many player identities exist at once. NOT a cap on detections.
+  # 6 for 3x3, 10 for 5x5. 0 disables the cap.
+  #
+  # Without this the tracker's id churn accumulates dozens of "id:47" labels
+  # over a few minutes. With it, a track needing a slot when the roster is full
+  # recycles the least-recently-seen one instead of minting another.
+  #
+  # Referees do NOT occupy a slot: src/track.py drops CLASS_REFEREE before the
+  # registry ever sees it, so 6 means six players plus however many referees.
+  max_players: 6
 
 # --- Court calibration ---------------------------------------------------
 # Homography is solved ONCE outside the frame loop; the 0619 footage is a fixed
@@ -184,9 +235,160 @@ shot:
 jersey:
   enabled: true
   # RECOVERED from the salvaged pipeline (--number_interval, default 5).
-  ocr_interval: 5
-  backend: pytesseract
+  # Lower this to 2-3 if numbers read correctly but never reach the vote
+  # quorum below; it is the cheapest way to feed the stabilizer more votes.
+  ocr_interval: 3
+
+  # auto | paddleocr | easyocr | pytesseract
+  #
+  # auto prefers paddleocr, then easyocr, then pytesseract (with a warning).
+  #
+  # DO NOT PIN THIS TO pytesseract. Tesseract was built for scanned documents
+  # and is by far the weakest option on 25-40 px jersey digits under motion
+  # blur; it also cannot report a real confidence, so it returns a constant 0.7
+  # and the confidence weighting in the stabilizer below stops meaning anything.
+  # It is kept only as a last-resort fallback.
+  #   pip install paddleocr     <- recommended
+  #   pip install easyocr       <- also good, digit allowlist constrains decoding
+  backend: auto
+  use_gpu: true
   tesseract_cmd: null   # null = find on PATH
+
+  # Stop calling OCR on a track once its number has locked. Leave this on:
+  # further calls can only re-confirm what is already known, and with a network
+  # backend each one costs seconds. Turn off only to measure raw OCR accuracy.
+  skip_locked_tracks: true
+  # Hard ceiling on OCR calls per run; 0 = unlimited. A safety net for metered
+  # backends so a misconfigured overnight run cannot rack up a bill.
+  max_ocr_calls: 0
+
+  # --- PARSeq (backend: parseq) -- ZERO TRAINING, WORKS TODAY --------------
+  #
+  # Pretrained scene-text recognizer. Koshkina & Elder's jersey-number paper
+  # reports it working on jersey numbers WITHOUT fine-tuning, and that matches
+  # what was measured here: 22/24 on synthetic 30-70 px blurred jersey crops
+  # straight out of the box.
+  #
+  # Weights load through torch.hub on first use (~91 MB, cached afterwards).
+  # Needs nothing installed beyond torch/torchvision: PARSeq's repo imports
+  # pytorch_lightning and nltk, and src/jersey.py supplies inference-only stubs
+  # for both when they are missing or broken. `pip install pytorch_lightning
+  # nltk` also works and takes precedence.
+  #
+  # Its two error modes, both handled in src/jersey.py:
+  #   - it can emit LETTERS ("O" for "0") because its charset is alphanumeric;
+  #     _HOMOGLYPHS repairs the unambiguous ones
+  #   - it is slower than a purpose-trained classifier (~5-15 ms on GPU)
+  parseq:
+    repo: baudm/parseq
+    entrypoint: parseq
+    # "github" (default) or "local". If GitHub is unreachable from the GPU box,
+    # clone the repo once and set repo to that path with source: local.
+    source: github
+    device: cuda
+    # PARSeq's trained input geometry. Changing these requires retraining.
+    image_height: 32
+    image_width: 128
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    min_confidence: 0.50
+
+  # --- Locally-trained classifier (backend: local) -- BEST, NEEDS TRAINING --
+  #
+  # Closed-set 0-99 classification, trained on the CC BY 4.0 Roboflow dataset:
+  #   python scripts/download_jersey_ocr_dataset.py --out data/jersey_ocr
+  #   python train/train_jersey.py --data data/jersey_ocr
+  #
+  # ~1-2 ms per crop on GPU with no network, versus 1.3-6.8 SECONDS for the
+  # hosted Roboflow endpoint. That difference is what makes running the
+  # recognizer on every OCR frame of a full game affordable at all.
+  #
+  # The checkpoint is self-describing (class list, input size, normalization
+  # constants all live inside it), so nothing here restates how it was trained.
+  local:
+    # Path to the checkpoint from train/train_jersey.py. null = backend
+    # unavailable, and `backend: auto` falls through to the next option.
+    weights: ../train/jersey_classifier.pt
+    device: cuda
+    # Reject predictions the model is not sure about, BEFORE they can vote.
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    min_confidence: 0.50
+    # Also require this margin between the top two classes. Softmax 0.6 on "8"
+    # with 0.39 on "6" is technically confident and is actually a coin flip
+    # between two digits that look identical at 20 px. 0 disables.
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    min_margin: 0.15
+
+  # --- Roboflow-hosted model (only used when backend: roboflow) ------------
+  # KEPT FOR REFERENCE / QUICK EXPERIMENTS ONLY. Prefer `local` above: same
+  # idea, three orders of magnitude faster, no key, no quota, no data leaving
+  # the machine.
+  roboflow:
+    # "project-slug/version". THE WORKSPACE IS NOT PART OF THIS.
+    # "workspace/project/version" is rejected by the SDK and 405s at the REST
+    # endpoint.
+    #
+    # It must be a DEPLOYED model. A Roboflow project of type "text-image-pairs"
+    # is an OCR *dataset* with no model behind it and returns HTTP 500
+    # "Service misconfiguration" on every call. Verified: the widely-linked
+    # `basketball-jersey-numbers-ocr/7` is exactly that type and CANNOT be used
+    # here, no matter how the client is configured.
+    #
+    # `digits-x7d7z/10` is a deployed per-digit detector (classes 0-9) that was
+    # verified to read a synthetic "23" correctly. Per-digit models return one
+    # box per digit; src/jersey.py sorts them left-to-right and concatenates.
+    model_id: digits-x7d7z/10
+
+    # MEASURED on the hosted endpoint: 2.6-6.8 SECONDS per crop. That is usable
+    # for a --max-frames smoke test and nothing else; a full 26k-frame game
+    # would issue tens of thousands of calls.
+    #
+    # For any real run, start a local inference server on the GPU box:
+    #   docker run -d --gpus all -p 9001:9001 roboflow/roboflow-inference-server-gpu
+    # then set:
+    #   api_url: http://localhost:9001
+    # Same model and same API, ~20-50 ms per call, no quota, and no frames
+    # leaving the machine.
+    api_url: https://serverless.roboflow.com
+
+    # The API key is read from this ENVIRONMENT VARIABLE and has deliberately
+    # no home in this file, which is committed to git:
+    #   export ROBOFLOW_API_KEY=your_key_here
+    api_key_env: ROBOFLOW_API_KEY
+    timeout_sec: 30.0
+    # Per-digit detections below this are dropped before assembly.
+    min_digit_confidence: 0.30
+
+  # How far a jersey box centre may sit outside a player box and still bind to
+  # it, as a fraction of that player's box height. 0.0 restores the old
+  # strict-containment rule, which silently discarded usable observations.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  owner_max_distance_ratio: 0.25
+
+  # When the detector produces NO jersey boxes, derive the number region from
+  # each player box geometrically instead of doing nothing at all.
+  #
+  # Weights trained without a `jersey` class otherwise make the OCR loop a
+  # complete no-op: no crops, no calls, no skips, and nothing in the summary to
+  # explain why numbers never appear. The recognizer is NOT at fault in that
+  # case - it is only ever handed crops the detector locates.
+  #
+  # This is a DEGRADED path. It cannot tell whether a player faces away, and on
+  # a side-on player it crops mostly blank shirt. Retraining with a jersey class
+  # is strictly better; this gets numbers today.
+  fallback_to_torso: true
+  # Torso band as fractions of the player box: below the head, above the waist,
+  # middle 60% of the width.
+  # 未恢复值，非源码调优值，需在真实视频上标定
+  torso_top: 0.15
+  torso_bottom: 0.55
+  torso_width: 0.60
+
+  # Set to a directory to dump every crop handed to OCR, named with what OCR
+  # returned. TURN THIS ON FIRST when numbers do not appear - it is the only
+  # thing that separates "the crop is unreadable" from "the recognizer failed
+  # on a readable crop", and those two have completely different fixes.
+  # Equivalent CLI flag: --dump-jersey-crops /tmp/crops
+  debug_crop_dir: null
 
   stabilizer:
     # These three were read as args.* by the salvaged source but NEVER declared
@@ -207,13 +409,38 @@ jersey:
   gate:
     # NEW in this project; the salvaged pipeline ran OCR on every matched box
     # regardless of size or blur, which is the main source of junk votes.
+    #
+    # MEASURED: at width 24 / height 32 the first calibrated 1080p 3x3 run gated
+    # out 308 of 320 candidates (96%), so the vote quorum was never reachable and
+    # no number could lock. Jersey boxes on a wide 3x3 camera are routinely
+    # 20x25 px. Since crops are now padded and upscaled before recognition, a
+    # small box is no longer a lost cause; roughly 12 px of digit height is the
+    # real floor. Raise these only if you measure junk votes.
     # 未恢复值，非源码调优值，需在真实视频上标定
-    min_box_width: 24
+    min_box_width: 12
     # 未恢复值，非源码调优值，需在真实视频上标定
-    min_box_height: 32
+    min_box_height: 14
     # 0.0 disables the sharpness test (it costs one Laplacian per crop).
+    # Prefer leaving this off until you have confirmed numbers are locking:
+    # an absolute Laplacian threshold on generally-soft footage rejects
+    # everything, which looks identical to "OCR is broken".
     # 未恢复值，非源码调优值，需在真实视频上标定
     min_laplacian_variance: 0.0
+
+    # Padding added on EACH side of the detector's box before recognition, as a
+    # fraction of box width/height.
+    #
+    # This is the fix for the jersey detector's weak high-IoU localization
+    # (mAP50 0.974 but mAP50-95 0.637 = a few px of edge jitter, which on a
+    # 30x20 box is enough to clip a digit). Padding absorbs that jitter.
+    # A TIGHT CROP IS NOT WHAT THE RECOGNIZER WANTS - do not set this to 0
+    # in the belief that a tighter box reads better. It does not.
+    pad_ratio: 0.18
+
+    # Upscale the padded crop to at least this height before OCR. Every
+    # available recognizer degrades sharply below ~30 px of text height, and
+    # cubic upscaling costs microseconds. 0 disables.
+    upscale_to_height: 96
 
 render:
   line_width: 2

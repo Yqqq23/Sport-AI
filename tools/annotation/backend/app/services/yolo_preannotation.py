@@ -1,3 +1,28 @@
+"""[已停用 2026-09] 出框统一由 basketball-v2 的 mine 提供。
+
+这个模块曾经是前端**唯一**在跑的出框链路（App.jsx 的 "Run YOLO
+Pre-annotation" 按钮）。它已经从 routes.py 的路由上摘掉：函数还在磁盘上，
+但没有 HTTP 入口，前端按钮也删了。
+
+停用原因 —— 训练/推理裁剪不一致：
+
+    检测器   通用 yolov8n.pt 的 COCO person 类（下面 cls != 0 那句），
+             不是 basketball-v2 那个 mAP50 0.974 的 5 类检测器，更没有它的
+             jersey 类（detect.CLASS_JERSEY == 3）。
+    球衣框   _estimate_jersey_bbox() 里硬编码的 25%/15%/25%/45%。推理时用的是
+             src/jersey.py::torso_region_from_player_box() 的 20%/15%/20%/55%
+             （而且那还只是检测器给不出 jersey 框时的回退路径）。
+             两者 IoU = 0.625 —— 面积只有 62.5%，号码带底部被切掉。
+    门限     完全没有。basketball-v2 有 min_box_width=12 / min_box_height=14 /
+             pad_ratio=0.18 / upscale_to_height=96，这里一个都没有。
+
+用这套框标出来的数据去微调，模型训练时见到的输入分布和上线后见到的不是
+一回事，而这种偏差在验证集上完全测不出来 —— 它只在上线那天出现。
+
+现在的通路：
+    jersey_train mine  ->  crops/ + manifest.jsonl  ->  scripts/import_crops.py
+"""
+
 from __future__ import annotations
 
 import json

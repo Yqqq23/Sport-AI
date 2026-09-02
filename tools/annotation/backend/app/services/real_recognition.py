@@ -1,3 +1,22 @@
+"""[已停用 2026-09] 出框统一由 basketball-v2 的 mine 提供。
+
+已从 routes.py 的路由上摘掉，函数保留在磁盘上但没有 HTTP 入口。名字叫
+"real" 但它并不比 mock 更接近推理时的行为：
+
+    检测器   同样是通用 yolov8n.pt 的 COCO person 类，不是 basketball-v2 的
+             5 类检测器。
+    球衣框   _estimate_jersey_bbox() 的 22%/16%/18%/52%，横向左右不对称
+             （左收 22%、右收 18%，中心右偏 2% 的框宽）。推理时那套是
+             以球员框中心**对称**的 20%–80% / 15%–55%。IoU = 0.845。
+    识别     Tesseract，--psm 7。
+    track_id temp_id = next_temp_id，每个框一个新号，跨帧不复用 —— 不是跟踪。
+    置信度   OCR 命中时恒返回 0.7（见 _recognize_by_tesseract 的 return），
+             不是模型的真实置信度。下游按阈值筛低置信度样本因此全无意义。
+
+现在的通路：
+    jersey_train mine  ->  crops/ + manifest.jsonl  ->  scripts/import_crops.py
+"""
+
 from __future__ import annotations
 
 import json

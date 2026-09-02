@@ -49,6 +49,10 @@ def ensure_sqlite_schema() -> None:
             )
 
         prediction_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(jersey_predictions)"))}
+        if prediction_columns and "crop_path" not in prediction_columns:
+            # NULLable：历史行（mock / yolo_preannotation）从来没有对应的裁剪
+            # 图文件，给它们编一个路径出来只会让下游去读一个不存在的文件。
+            conn.execute(text("ALTER TABLE jersey_predictions ADD COLUMN crop_path VARCHAR(1024)"))
         if prediction_columns and "source" not in prediction_columns:
             # Existing rows cannot be attributed after the fact, so they are
             # marked 'unknown' rather than guessed at. The UI treats unknown as
@@ -61,6 +65,18 @@ def ensure_sqlite_schema() -> None:
                     f"VARCHAR(32) NOT NULL DEFAULT '{PREDICTION_SOURCE_UNKNOWN}'"
                 )
             )
+
+        # 抽帧参数的留痕。全部 NULLable：老视频抽帧时这些值没被记下来，
+        # 填一个「合理的默认值」等于伪造记录 —— NULL 才是诚实的「不知道」。
+        video_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(video_assets)"))}
+        if video_columns:
+            for column_name, column_type in {
+                "fps": "FLOAT",
+                "frame_interval": "INTEGER",
+                "decode_path": "VARCHAR(32)",
+            }.items():
+                if column_name not in video_columns:
+                    conn.execute(text(f"ALTER TABLE video_assets ADD COLUMN {column_name} {column_type}"))
 
         dataset_version_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(dataset_versions)"))}
         if dataset_version_columns:

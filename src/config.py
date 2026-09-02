@@ -19,7 +19,14 @@ from typing import Any, Optional, TypeVar, get_type_hints
 
 from calib import CourtCanvasConfig
 from detect import DetectorConfig
-from jersey import JerseyStabilizerConfig, OCRGateConfig
+from identity import IdentityConfig
+from jersey import (
+    JerseyStabilizerConfig,
+    LocalClassifierConfig,
+    OCRGateConfig,
+    PARSeqConfig,
+    RoboflowConfig,
+)
 from render import CourtRenderConfig
 from shot import ShotConfig
 from track import TrackerConfig
@@ -37,6 +44,7 @@ _PATH_KEYS = {
     "output_dir",
     "generated_tracker_dir",
     "tesseract_cmd",
+    "debug_crop_dir",
 }
 
 
@@ -63,11 +71,56 @@ class JerseyPipelineConfig:
     #: Run OCR every N frames. Salvaged default from the source pipeline
     #: (--number_interval, default 5).
     ocr_interval: int = 5
-    backend: str = "pytesseract"
+    #: "auto" | "parseq" | "local" | "roboflow" | "paddleocr" | "easyocr"
+    #: | "pytesseract".
+    #: Default is "auto": the locally-trained classifier when its weights exist,
+    #: then PARSeq (no training needed), then paddleocr/easyocr, and only
+    #: pytesseract with a warning. The previous hard default of "pytesseract"
+    #: silently pinned the pipeline to the weakest recognizer even on machines
+    #: with a good one available.
+    backend: str = "auto"
     #: Optional explicit path to the tesseract binary.
     tesseract_cmd: Optional[Path] = None
+    #: Run the OCR backend on GPU where the backend supports it.
+    use_gpu: bool = True
+    #: How far a jersey box centre may sit OUTSIDE a player box and still be
+    #: attributed to it, as a fraction of that player's box height. The old
+    #: code required the centre to be strictly inside (distance == 0.0), so a
+    #: jersey box a few pixels proud of a tight player box was dropped without
+    #: even being counted as a skip.
+    owner_max_distance_ratio: float = 0.25
+    #: When the detector produces NO jersey boxes, derive the number region
+    #: geometrically from each player box instead of doing nothing.
+    #:
+    #: Weights trained without a `jersey` class otherwise make the whole OCR
+    #: loop a no-op - no crops, no calls, no skips - and nothing in the summary
+    #: explains the silence. This keeps numbers working on such weights, at
+    #: lower accuracy than a real jersey detection.
+    fallback_to_torso: bool = True
+    #: Torso band as fractions of the player box: vertical span and the
+    #: fraction of width kept around the centre. Defaults put the band between
+    #: 15% and 55% of height (below the head, above the waist), middle 60% wide.
+    torso_top: float = 0.15
+    torso_bottom: float = 0.55
+    torso_width: float = 0.60
+    #: Directory to dump the exact crops handed to OCR, for eyeballing what the
+    #: recognizer actually sees. None disables. This is the first thing to turn
+    #: on when numbers are not appearing - it separates "crop is unreadable" from
+    #: "recognizer is failing on a readable crop", which no metric can.
+    debug_crop_dir: Optional[Path] = None
+    #: Stop calling OCR for a track once its number has LOCKED. Essential with
+    #: a network backend (Roboflow serverless measures 2.6-6.8 s per crop, so a
+    #: full game is otherwise days of wall clock) and a free win on every other
+    #: backend. Turn it off only when deliberately measuring raw OCR accuracy.
+    skip_locked_tracks: bool = True
+    #: Hard ceiling on OCR calls per run. 0 = unlimited. A safety net for
+    #: metered backends: it bounds the bill of a misconfigured overnight run.
+    max_ocr_calls: int = 0
     stabilizer: JerseyStabilizerConfig = field(default_factory=JerseyStabilizerConfig)
     gate: OCRGateConfig = field(default_factory=OCRGateConfig)
+    roboflow: RoboflowConfig = field(default_factory=RoboflowConfig)
+    local: LocalClassifierConfig = field(default_factory=LocalClassifierConfig)
+    parseq: PARSeqConfig = field(default_factory=PARSeqConfig)
 
 
 @dataclass
@@ -86,6 +139,7 @@ class AppConfig:
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     shot: ShotConfig = field(default_factory=ShotConfig)
     jersey: JerseyPipelineConfig = field(default_factory=JerseyPipelineConfig)
+    identity: IdentityConfig = field(default_factory=IdentityConfig)
     render: RenderPipelineConfig = field(default_factory=RenderPipelineConfig)
     canvas: CourtCanvasConfig = field(default_factory=CourtCanvasConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -196,6 +250,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         tracker=_build(TrackerConfig, raw.get("tracker"), base_dir),
         shot=_build(ShotConfig, raw.get("shot"), base_dir),
         jersey=_build(JerseyPipelineConfig, raw.get("jersey"), base_dir),
+        identity=_build(IdentityConfig, raw.get("identity"), base_dir),
         render=_build(RenderPipelineConfig, raw.get("render"), base_dir),
         canvas=_build(CourtCanvasConfig, raw.get("canvas"), base_dir),
         output=_build(OutputConfig, raw.get("output"), base_dir),

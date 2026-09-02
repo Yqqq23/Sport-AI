@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from typing import Optional
+
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +16,16 @@ class VideoAsset(Base):
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="uploaded")
+    #: 抽帧当时的实际参数。三个字段都是**记录**而非配置：改这里不会改变已经
+    #: 抽好的帧，它们存在只为回答「这批帧当时是怎么来的」。
+    #:
+    #: 没有它们的话，事后只能靠 video_frames.frame_id 的差分倒推 interval，
+    #: 而 fps 和解码路径根本无从查起 —— 解码路径尤其要命：装了 ffmpeg 的机器
+    #: 数的是转码产物，没装的数的是原视频，同一份代码两套帧号语义。
+    fps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    frame_interval: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: 'ffmpeg_transcode' | 'direct'，见 app.services.storage.decode_path()
+    decode_path: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     frames: Mapped[list["VideoFrame"]] = relationship(
         back_populates="video",
@@ -50,6 +62,23 @@ PREDICTION_SOURCE_YOLO = "yolo_preannotation"
 PREDICTION_SOURCE_REAL = "real_recognition"
 PREDICTION_SOURCE_UNKNOWN = "unknown"
 
+#: 由 basketball-v2 的 jersey_train mine 挖出、经 scripts/import_crops.py 导入。
+#: 这是 2026-09 之后**唯一**会写进来的两个值，上面三个只可能出现在历史行上。
+#:
+#: 分成两个值而不是一个 'mine'，因为这两条路的框质量差一个量级：
+#:   detector       检测器的 jersey 类框（detect.CLASS_JERSEY == 3）
+#:   torso_fallback 检测器一个 jersey 框都没给出来时的几何回退。它不知道球员
+#:                  是不是背对镜头，侧身球员上裁到的多半是空球衣。
+#: 混成一个值，就没法在训练时把回退框的系统性偏差单独拎出来看。
+PREDICTION_SOURCE_MINE_DETECTOR = "mine_detector"
+PREDICTION_SOURCE_MINE_TORSO = "mine_torso_fallback"
+
+#: manifest.jsonl 的 source 字段 -> 本表 source 列。
+MINE_SOURCE_MAP = {
+    "detector": PREDICTION_SOURCE_MINE_DETECTOR,
+    "torso_fallback": PREDICTION_SOURCE_MINE_TORSO,
+}
+
 
 class JerseyPrediction(Base):
     __tablename__ = "jersey_predictions"
@@ -69,6 +98,15 @@ class JerseyPrediction(Base):
     #: real detections once they are in the database, and a reviewer can spend an
     #: afternoon "correcting" pure noise.
     source: Mapped[str] = mapped_column(String(32), nullable=False, default=PREDICTION_SOURCE_UNKNOWN)
+    #: 这一行对应的裁剪图，相对 data/crops 的路径。只有 mine 导进来的行有值。
+    #:
+    #: 两个用途，第二个更重要：
+    #:   1. 能直接看到「模型推理时**真正**会看到的那张图」，而不是从整帧上
+    #:      按框重切一次（重切就又多了一处可能和 crop_jersey 走样的地方）;
+    #:   2. 当导入的幂等键。mine 的文件名是 f{frame_idx}__box_{box_idx}.png，
+    #:      对 (video, frame_idx, box_idx) 唯一，所以 (video_id, crop_path)
+    #:      天然就是那个「重复导入不产生重复行」的键，不用另开一列 box_idx。
+    crop_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     video: Mapped[VideoAsset] = relationship(back_populates="predictions")

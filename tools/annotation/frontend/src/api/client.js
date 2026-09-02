@@ -184,23 +184,12 @@ export async function deleteAnnotation(annotationId) {
   })
 }
 
-export async function runRecognition(videoId) {
-  return request(`/videos/${videoId}/run-jersey-recognition`, {
-    method: 'POST',
-  })
-}
-
-export async function runRecognitionAsync(videoId) {
-  return request(`/videos/${videoId}/run-jersey-recognition-async`, {
-    method: 'POST',
-  })
-}
-
-export async function runYoloPreannotationAsync(videoId) {
-  return request(`/videos/${videoId}/run-yolo-preannotation-async`, {
-    method: 'POST',
-  })
-}
+// runRecognition / runRecognitionAsync / runYoloPreannotationAsync 删于 2026-09。
+// 对应的后端路由已经摘掉（见 backend/app/api/routes.py 里「已停用的出框路径」）。
+// 留着这几个函数只会让人以为还能调，调了拿到 404 再回头查一遍为什么。
+//
+// 出框现在由 basketball-v2 的 jersey_train mine 离线产出，经
+// tools/annotation/scripts/import_crops.py 导入。网页只做人工标注。
 
 export async function fetchJob(jobId) {
   return request(`/jobs/${jobId}`)

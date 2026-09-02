@@ -15,7 +15,9 @@ from jersey import (  # noqa: E402
     JerseyNumberStabilizer,
     JerseyStabilizerConfig,
     OCRGateConfig,
+    RoboflowJerseyOCR,
     clean_jersey_number,
+    digits_from_scene_text,
     should_run_ocr,
 )
 
@@ -105,6 +107,84 @@ for f in range(5):
 check("track 10", s6.get_stable_number(10), "11")
 check("track 20", s6.get_stable_number(20), "22")
 check("unknown track", s6.get_stable_number(99), None)
+
+# --- scene-text homoglyph repair -----------------------------------------
+# PARSeq decodes over an alphanumeric charset, so it emits LETTERS for jersey
+# digits. Measured: reading "0" as the letter "O" was the single largest error
+# source (both failures in the first 24-crop probe). Repairing it took that run
+# from 22/24 to 23/24.
+print("digits_from_scene_text")
+check("'O' -> '0' (the measured failure)", digits_from_scene_text("O"), "0")
+check("'o' -> '0'", digits_from_scene_text("o"), "0")
+check("'l1' -> '11'", digits_from_scene_text("l1"), "11")
+check("'S' -> '5'", digits_from_scene_text("S"), "5")
+check("'B' -> '8'", digits_from_scene_text("B"), "8")
+check("'Z3' -> '23'", digits_from_scene_text("Z3"), "23")
+check("plain digits untouched", digits_from_scene_text("23"), "23")
+check("'#7' -> '7'", digits_from_scene_text("#7"), "7")
+check("'O7' -> '7' (leading zero stripped)", digits_from_scene_text("O7"), "7")
+# The map must NOT be so aggressive that junk decodes as a number. "b"->6 alone
+# used to make "abc" read as "6"; that entry was removed after this test.
+check("junk letters stay rejected", digits_from_scene_text("abc"), None)
+check("'O0' is '00', which is rejected", digits_from_scene_text("O0"), None)
+check("empty", digits_from_scene_text(""), None)
+check("None", digits_from_scene_text(None), None)
+
+# --- Roboflow response parsing -------------------------------------------
+# Two shapes, decided by the project owner, not by us. Parsed offline here so
+# the assembly logic is covered without spending a live API call per assertion.
+print("roboflow response parsing")
+rf = RoboflowJerseyOCR(model_id="test/1")
+
+
+def det(cls, x, conf):
+    return {"class": str(cls), "x": x, "y": 50, "width": 20, "height": 30, "confidence": conf}
+
+
+# Per-digit detection. Roboflow returns digits in arbitrary order; the reader
+# must sort by x. Given out of order here ON PURPOSE - this is the regression
+# that would silently turn every "23" into "32".
+check(
+    "per-digit boxes assemble left to right",
+    rf._parse({"predictions": [det(3, 111, 0.95), det(2, 44, 0.93)]}),
+    ("23", 0.93),
+)
+check(
+    "single digit",
+    rf._parse({"predictions": [det(7, 60, 0.96)]}),
+    ("7", 0.96),
+)
+# Confidence is the WEAKEST digit, not the mean: a barely-read digit makes the
+# whole number barely read.
+check(
+    "confidence is the weakest digit",
+    rf._parse({"predictions": [det(1, 40, 0.99), det(9, 90, 0.42)]}),
+    ("19", 0.42),
+)
+check(
+    "low-confidence digits are dropped before assembly",
+    rf._parse({"predictions": [det(2, 44, 0.93), det(3, 111, 0.05)]}),
+    ("2", 0.93),
+)
+check(
+    "three digits are rejected by clean_jersey_number",
+    rf._parse({"predictions": [det(1, 20, 0.9), det(2, 50, 0.9), det(3, 80, 0.9)]}),
+    (None, 0.0),
+)
+check("no predictions", rf._parse({"predictions": []}), (None, 0.0))
+check("junk response", rf._parse("not a dict"), (None, 0.0))
+
+# Classification shape: predictions is a DICT keyed by class name.
+check(
+    "classification picks the top class",
+    rf._parse({"predictions": {"7": {"confidence": 0.3}, "23": {"confidence": 0.88}}}),
+    ("23", 0.88),
+)
+check(
+    "classification ignores unparseable classes",
+    rf._parse({"predictions": {"unknown": {"confidence": 0.99}, "5": {"confidence": 0.4}}}),
+    ("5", 0.4),
+)
 
 print()
 if failures:

@@ -26,7 +26,15 @@ from app.services.fixed7_adapter import Fixed7AdapterError, fixed7_diagnostic_re
 from app.services.yolo_export import JERSEY_NUMBERS_FILENAME, JERSEY_NUMBERS_SCHEMA, SPORT_CV_DETECTED_FRAMEWORK, SPORT_CV_DETECTED_MODEL_VERSION, SPORT_CV_TARGET_PROJECT, validate_yolo_dataset
 from app.services.mock_recognition import MOCK_PREDICTION_WARNING, generate_mock_predictions, is_mock_prediction
 from app.services.real_recognition import RealJerseyRecognizer, RealRecognitionConfigurationError
-from app.services.storage import ensure_data_dirs, extract_frames, frame_output_dir, video_output_path
+from app.services.storage import (
+    FrameCountMismatchError,
+    decode_path,
+    ensure_data_dirs,
+    extract_frames,
+    frame_output_dir,
+    probe_fps,
+    video_output_path,
+)
 from app.services.yolo_preannotation import YoloPreannotationError, YoloPreannotator
 
 
@@ -653,13 +661,37 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
     return _job_to_schema(job)
 
 
-@router.get("/recognition/fixed7-check", include_in_schema=False)
+# ==========================================================================
+# 已停用的出框路径（2026-09）
+# ==========================================================================
+# 下面这些函数不再挂 @router，因此**没有 HTTP 入口**。函数体保留是为了
+# 历史可读性和 import 兼容，不是为了随时能开回来。
+#
+# 为什么全部停用：仓库里曾经有四套互不相同的球衣框几何，谁在跑取决于点了
+# 哪个按钮，而它们和推理时真正用的那套（basketball-v2 的
+# src/jersey.py::torso_region_from_player_box，以及优先于它的
+# detect.CLASS_JERSEY 检测框）IoU 只有 0.625–0.87。用其中任何一套标出来的
+# 数据去微调，训练分布和推理分布就是错开的，而这种错开在验证集上完全看不出来。
+#
+# 出框现在统一由 basketball-v2 的 jersey_train mine 提供，经
+# scripts/import_crops.py 导入，source 列记录框来自 detector 还是 torso_fallback。
+#
+#   run_mock_jersey_recognition / _async      mock_recognition.py     纯造假
+#   run_jersey_recognition / _async           real_recognition.py     yolov8n + 硬编码几何
+#   run_yolo_preannotation_async              yolo_preannotation.py   yolov8n + 另一套硬编码几何
+#   recognition_fixed7_check / fixed7_dry_run fixed7_adapter.py       第三个仓库，又一套几何
+#
+# 四个 service 文件都留在磁盘上，顶部有同样说明。
+# ==========================================================================
+
+
 def recognition_fixed7_check() -> dict[str, Any]:
+    """[已停用] 见上方说明。原路由 GET /recognition/fixed7-check"""
     return fixed7_diagnostic_report()
 
 
-@router.post("/videos/{video_id}/fixed7-dry-run", include_in_schema=False)
 def fixed7_dry_run(video_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """[已停用] 见上方说明。原路由 POST /videos/{video_id}/fixed7-dry-run"""
     video = db.query(VideoAsset).filter(VideoAsset.id == video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -960,8 +992,8 @@ def list_annotation_candidates(video_id: int, threshold: float = 0.7, db: Sessio
         raise
 
 
-@router.post("/videos/{video_id}/run-mock-jersey-recognition", response_model=MockRecognitionResponse, include_in_schema=False)
 def run_mock_jersey_recognition(video_id: int, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /videos/{video_id}/run-mock-jersey-recognition"""
     video = db.query(VideoAsset).filter(VideoAsset.id == video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -978,8 +1010,8 @@ def run_mock_jersey_recognition(video_id: int, db: Session = Depends(get_db)):
     return MockRecognitionResponse(video_id=video.id, prediction_count=len(predictions), status=video.status)
 
 
-@router.post("/videos/{video_id}/run-jersey-recognition", response_model=RecognitionResponse, include_in_schema=False)
 def run_jersey_recognition(video_id: int, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /videos/{video_id}/run-jersey-recognition"""
     video = db.query(VideoAsset).filter(VideoAsset.id == video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -1013,8 +1045,8 @@ def run_jersey_recognition(video_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/videos/{video_id}/run-mock-jersey-recognition-async", response_model=JobQueuedResponse, include_in_schema=False)
 def run_mock_jersey_recognition_async(video_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /videos/{video_id}/run-mock-jersey-recognition-async"""
     video = db.query(VideoAsset).filter(VideoAsset.id == video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -1035,14 +1067,8 @@ def run_mock_jersey_recognition_async(video_id: int, background_tasks: Backgroun
     return JobQueuedResponse(job_id=job.job_id, status=job.status, poll_url=f"/jobs/{job.job_id}")
 
 
-@router.post(
-    "/videos/{video_id}/run-jersey-recognition-async",
-    response_model=JobQueuedResponse,
-    summary="运行真实球衣识别（异步）",
-    description="启动真实球衣号码识别任务。推荐普通使用者调用该异步接口，然后通过 /jobs/{job_id} 轮询进度。",
-    tags=["球衣识别"],
-)
 def run_jersey_recognition_async(video_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /videos/{video_id}/run-jersey-recognition-async"""
     video = db.query(VideoAsset).filter(VideoAsset.id == video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -1065,14 +1091,13 @@ def run_jersey_recognition_async(video_id: int, background_tasks: BackgroundTask
     return JobQueuedResponse(job_id=job.job_id, status=job.status, poll_url=f"/jobs/{job.job_id}")
 
 
-@router.post(
-    "/videos/{video_id}/run-yolo-preannotation-async",
-    response_model=JobQueuedResponse,
-    summary="运行 YOLO 预标注（异步）",
-    description="使用可用的预训练 YOLO 人体检测模型对视频帧进行预标注，生成人体框和估计的球衣区域框。即使没有 OCR 或跟踪模型，也可用于人工标注辅助。",
-    tags=["球衣识别"],
-)
 def run_yolo_preannotation_async(video_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /videos/{video_id}/run-yolo-preannotation-async
+
+    这条是前端**唯一**在用的出框链路，所以它的停用是整件事的重点：
+    yolov8n 的 COCO person 类 + yolo_preannotation._estimate_jersey_bbox()
+    的 25%/15%/25%/45% 几何，和推理时的 20%/15%/20%/55% IoU 只有 0.625。
+    """
     video = db.query(VideoAsset).filter(VideoAsset.id == video_id).first()
     if video is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -1181,6 +1206,10 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
 
     mock_prediction_count = sum(1 for prediction in predictions if is_mock_prediction(prediction))
 
+    # 进不了队列的两类条目，分开计数因为原因完全不同。
+    skipped_too_small = 0     # 框太小，推理时也会被 gate 挡掉，标了没用
+    skipped_no_box = 0        # 这一帧没有任何框
+
     items: list[ReviewItemRead] = []
     for frame in frames:
         frame_predictions = predictions_by_frame.get(int(frame.frame_id), [])
@@ -1189,6 +1218,18 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
         ]
         if frame_predictions:
             for prediction in frame_predictions:
+                jersey_bbox = _parse_bbox(
+                    prediction.jersey_bbox, field_name="jersey_bbox", prediction_id=prediction.id
+                )
+                # 尺寸门限。和导入侧（scripts/import_crops.py）读的是同一份配置，
+                # 数值本身来自 basketball-v2 的 OCRGateConfig。推理时会被挡掉的
+                # 图，摆到人面前只是浪费标注时间。
+                if (
+                    (jersey_bbox[2] - jersey_bbox[0]) < settings.min_crop_width
+                    or (jersey_bbox[3] - jersey_bbox[1]) < settings.min_crop_height
+                ):
+                    skipped_too_small += 1
+                    continue
                 frame_path, width, height, _ = _ensure_frame_metadata(prediction)
                 annotation = annotations_by_key.get((video_id, int(prediction.id)))
                 items.append(
@@ -1203,7 +1244,7 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
                         image_width=width,
                         image_height=height,
                         player_bbox=_parse_bbox(prediction.player_bbox, field_name="player_bbox", prediction_id=prediction.id),
-                        jersey_bbox=_parse_bbox(prediction.jersey_bbox, field_name="jersey_bbox", prediction_id=prediction.id),
+                        jersey_bbox=jersey_bbox,
                         predicted_number=prediction.predicted_number,
                         confidence=float(prediction.confidence or 0.0),
                         is_mock_prediction=is_mock_prediction(prediction),
@@ -1215,9 +1256,20 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
                         saved_boxes=saved_boxes,
                     )
                 )
+        elif not saved_boxes:
+            # 既没有导入的框、也没有已保存的标注 —— 跳过。
+            #
+            # 这里原来会合成一个「整帧 35%–65% / 20%–50%」的兜底框塞进队列。
+            # 那个框和球员位置毫无关系（1920×1080 上是固定的 576×324 大块），
+            # 人对着它调出来的东西既不是检测结果、也不是干净的手工标注，
+            # 只是给数据集掺沙子。
+            skipped_no_box += 1
         else:
+            # 没有导入的框，但这一帧上已经有人工画过的框。必须留下 —— 不然
+            # 已经标好的东西在界面上就消失了，看起来像标注丢了。
+            # jersey_bbox 给 None：没有预测就是没有预测，不编一个出来。
+            # 前端的取值链是 corrected_bbox ?? jersey_bbox，走前一半。
             frame_path = Path(frame.frame_path) if frame.frame_path else _canonical_frame_path(video_id, frame.frame_id)
-            image_url = _frame_image_url(video_id, frame.frame_id, frame_path)
             manual_prediction_id = -(int(frame.frame_id) + 1)
             annotation = annotations_by_key.get((video_id, manual_prediction_id))
             items.append(
@@ -1227,7 +1279,7 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
                     video_id=video_id,
                     frame_id=frame.frame_id,
                     track_id=0,
-                    image_url=image_url,
+                    image_url=_frame_image_url(video_id, frame.frame_id, frame_path),
                     frame_path=str(frame_path) if frame_path is not None else None,
                     image_width=frame.image_width,
                     image_height=frame.image_height,
@@ -1247,9 +1299,28 @@ def list_review_items(video_id: int, db: Session = Depends(get_db)):
 
     message = None
     if not items:
-        message = "No frames found. Please upload a video first."
-    elif not predictions:
-        message = "No YOLO pre-annotations found. You can still annotate frames manually."
+        if not frames:
+            message = "No frames found. Please upload a video first."
+        else:
+            message = (
+                "No annotatable boxes for this video. "
+                "Run jersey_train mine, then scripts/import_crops.py to import crops."
+            )
+    elif skipped_too_small or skipped_no_box:
+        message = (
+            f"{len(items)} boxes queued. "
+            f"Skipped {skipped_too_small} below the "
+            f"{settings.min_crop_width}x{settings.min_crop_height} crop gate, "
+            f"{skipped_no_box} frames with no imported box."
+        )
+
+    LOGGER.info(
+        "review items video_id=%s frames=%s predictions=%s queued=%s "
+        "skipped_too_small=%s skipped_no_box=%s gate=%sx%s",
+        video_id, len(frames), len(predictions), len(items),
+        skipped_too_small, skipped_no_box,
+        settings.min_crop_width, settings.min_crop_height,
+    )
 
     mock_warning = None
     if mock_prediction_count:
@@ -2362,6 +2433,13 @@ async def upload_video(
         extracted = extract_frames(target, frames_dir, frame_interval=frame_interval)
         LOGGER.info("frame extraction finished video_id=%s extracted_frames=%s", asset.id, len(extracted))
 
+        # 抽帧参数留痕。下游（jersey_train 的 mine）需要 frame_interval 来定
+        # stride；decode_path 用来判断落盘的帧号数的是原视频还是转码产物。
+        # 不记下来的话事后只能靠帧号差分猜 interval，fps 和解码路径无从查起。
+        asset.fps = probe_fps(target) or None
+        asset.frame_interval = int(frame_interval)
+        asset.decode_path = decode_path()
+
         frame_rows = [
             VideoFrame(
                 video_id=asset.id,
@@ -2378,6 +2456,13 @@ async def upload_video(
         db.commit()
         db.refresh(asset)
         LOGGER.info("database commit finished video_id=%s", asset.id)
+    except FrameCountMismatchError as exc:
+        # VFR 素材。帧号已经不可信，接受这次上传只会产出一批对不回原视频的帧。
+        # 连视频文件一起删掉：留着它只会让人以为「传上去了，重跑一下就好」。
+        db.rollback()
+        target.unlink(missing_ok=True)
+        LOGGER.error("upload rejected, frame count mismatch: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception:
         db.rollback()
         raise
@@ -2539,23 +2624,25 @@ def rebuild_dataset_version_api_alias(dataset_version_id: int, db: Session = Dep
     return rebuild_dataset_version_route(dataset_version_id=dataset_version_id, db=db)
 
 
-@router.post("/api/videos/{video_id}/run-mock-jersey-recognition", response_model=MockRecognitionResponse, include_in_schema=False)
+# /api/... 的四条出框别名同样摘掉。别名和本名必须同进同退 —— 只摘本名的话
+# 前端换个前缀就能把停用的路径又调起来，而 source 列会照样记成 real/yolo/mock。
 def run_mock_predictions_api_alias(video_id: int, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /api/videos/{video_id}/run-mock-jersey-recognition"""
     return run_mock_jersey_recognition(video_id, db)
 
 
-@router.post("/api/videos/{video_id}/run-mock-jersey-recognition-async", response_model=JobQueuedResponse, include_in_schema=False)
 def run_mock_predictions_async_api_alias(video_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /api/videos/{video_id}/run-mock-jersey-recognition-async"""
     return run_mock_jersey_recognition_async(video_id=video_id, background_tasks=background_tasks, db=db)
 
 
-@router.post("/api/videos/{video_id}/run-jersey-recognition", response_model=RecognitionResponse, include_in_schema=False)
 def run_predictions_api_alias(video_id: int, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /api/videos/{video_id}/run-jersey-recognition"""
     return run_jersey_recognition(video_id=video_id, db=db)
 
 
-@router.post("/api/videos/{video_id}/run-jersey-recognition-async", response_model=JobQueuedResponse, include_in_schema=False)
 def run_predictions_async_api_alias(video_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """[已停用] 原路由 POST /api/videos/{video_id}/run-jersey-recognition-async"""
     return run_jersey_recognition_async(video_id=video_id, background_tasks=background_tasks, db=db)
 
 

@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 10
+names: ['ball', 'ball-in-basket', 'number', 'player', 'player-in-possession', 'player-jump-shot', 'player-layup-dunk', 'player-shot-block', 'referee', 'rim']
+
+roboflow:
+  workspace: roboflow-jvuqo
+  project: basketball-player-detection-3-ycjdo
+  version: 18
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/roboflow-jvuqo/basketball-player-detection-3-ycjdo/dataset/18

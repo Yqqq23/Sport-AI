@@ -50,9 +50,22 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```bash
 pip install -r requirements.txt
 
-# tesseract is a SYSTEM package; the pip module is only a binding
+# Jersey number recognition. Install ONE of these; paddleocr is the default pick.
+pip install paddleocr          # recommended
+# pip install easyocr          # alternative, digit allowlist constrains decoding
+
+# tesseract is the LAST-RESORT fallback only - see the warning below.
+# It is a SYSTEM package; the pip module is only a binding.
 sudo apt-get update && sudo apt-get install -y tesseract-ocr
 ```
+
+> **Do not rely on tesseract for jersey numbers.** It was built for scanned
+> documents, not for 25-40 px digits on a moving shirt, and it cannot report a
+> real confidence — it returns a constant 0.7, which makes the
+> confidence-weighted voting in `src/jersey.py` meaningless. `jersey.backend`
+> defaults to `auto`, which prefers `paddleocr`, then `easyocr`, and only falls
+> back to tesseract with a loud warning. If the run summary prints
+> `jersey backend  PytesseractJerseyOCR`, install one of the other two.
 
 > **`ultralytics>=8.4.63` is required, not preferred.** The `ocsort`,
 > `deepocsort`, `fasttrack` and `tracktrack` backends were added in that
@@ -483,10 +496,131 @@ value survives anywhere. They are guesses.
 | A correct number is abandoned too easily when a player turns away | Increase `slot_reassign_patience` to 15 |
 
 `jersey.gate.min_box_width` / `min_box_height` control which crops OCR runs on
-at all. The run summary prints how many OCR calls were made versus skipped: if
-almost everything is skipped, lower them; if OCR is slow and produces garbage,
-raise them. Setting `min_laplacian_variance` above 0 additionally rejects
-motion-blurred crops at the cost of one Laplacian per crop.
+at all. The run summary breaks skips down **by reason**
+(`too_small` / `too_blurry` / `no_owner` / `bad_crop`), so it names the threshold
+that starved a run rather than leaving you to guess.
+
+> Measured on 1080p 3x3 footage: at the old defaults of 24 x 32, **308 of 320
+> candidates (96%) were gated out**, the vote quorum was never reachable, and no
+> number could ever lock. Jersey boxes on a wide 3x3 camera are routinely
+> 20 x 25 px. The defaults are now 12 x 14.
+
+`jersey.gate.pad_ratio` (0.18) and `upscale_to_height` (96) decide what the
+recognizer actually sees. The crop is **deliberately padded** beyond the
+detector's box before recognition, then upscaled.
+
+> **A tight crop is not what the recognizer wants.** The jersey detector is
+> strong at *finding* the number (mAP50 ~0.97) but weak at pixel-exact boxes
+> (mAP50-95 ~0.64) — which is normal, not a defect: on a 30 x 20 box, 3 px of
+> edge error alone drops IoU to ~0.64, and annotation itself is only consistent
+> to within 2-3 px. Padding absorbs that jitter so the weak high-IoU
+> localization stops mattering. Do not set `pad_ratio` to 0 believing a tighter
+> box reads better.
+
+Setting `min_laplacian_variance` above 0 additionally rejects motion-blurred
+crops at the cost of one Laplacian per crop. Leave it at 0 until numbers are
+locking: an absolute threshold on generally-soft footage rejects everything,
+which looks identical to "OCR is broken".
+
+### PARSeq — the zero-training option (start here)
+
+```bash
+python src/pipeline.py --input game.mp4 --config configs/default.yaml \
+  --output-dir outputs/parseq --jersey-backend parseq \
+  --max-frames 1000 --dump-jersey-crops /tmp/crops
+```
+
+Nothing to train, nothing to install beyond torch/torchvision. Weights come down
+through `torch.hub` on first use (~91 MB, cached). Koshkina & Elder's
+jersey-number paper reports PARSeq working on jersey numbers *without*
+fine-tuning, which matched what was measured here: **23/24 on synthetic 30–70 px
+blurred jersey crops**, ~50 ms per crop on CPU (expect ~5–15 ms on GPU).
+
+Three things worth knowing:
+
+- **It emits letters.** PARSeq decodes over an alphanumeric charset, so it reads
+  the digit `0` as the letter `O` — that was *both* failures in the first probe.
+  `digits_from_scene_text` repairs the near-identical glyphs (`O/o/D/Q→0`,
+  `I/l/i/|→1`, `Z/z→2`, `S/s→5`, `G→6`, `B→8`) and that alone took the run from
+  22/24 to 23/24. The map is deliberately tight: `b→6` was removed after it made
+  the junk string `"abc"` decode as `6`.
+- **`pytorch_lightning` and `nltk` are not required.** PARSeq's repo imports both
+  (a LightningModule base class and one validation metric), neither needed for
+  inference. `src/jersey.py` installs inference-only stubs when they are missing
+  *or broken* — the check actually imports rather than calling `find_spec`,
+  because a package can be installed and still raise (pytorch_lightning →
+  torchmetrics → transformers → sklearn is a real ABI-breakage chain).
+- **`trust_repo=True` is mandatory.** Without it `torch.hub` prompts on stdin and
+  a pipeline run hangs forever.
+
+If GitHub is unreachable from the GPU box, clone once and switch to a local
+source:
+
+```yaml
+jersey:
+  parseq:
+    repo: /path/to/parseq
+    source: local
+```
+
+### Using a Roboflow-hosted model
+
+```bash
+pip install inference-sdk
+export ROBOFLOW_API_KEY=your_key_here        # never put the key in the YAML
+
+python src/pipeline.py --input game.mp4 --config configs/default.yaml \
+  --output-dir outputs/rf --jersey-backend roboflow \
+  --roboflow-model digits-x7d7z/10 --max-frames 300
+```
+
+Three things about Roboflow model ids that cost real time to discover:
+
+1. **The id is `project-slug/version`. The workspace is not part of it.**
+   `workspace/project/version` is rejected by the SDK and returns HTTP 405 from
+   the REST endpoint.
+2. **The project must have a DEPLOYED model.** A Roboflow project of type
+   `text-image-pairs` is an OCR *dataset* with nothing served behind it, and
+   every call returns `500 Service misconfiguration`. The widely-linked
+   `basketball-jersey-numbers-ocr/7` is exactly that type and **cannot be used
+   here at all** — no client configuration fixes it. Check a project's type with
+   `GET https://api.roboflow.com/{workspace}/{project}?api_key=...` before
+   wiring it in.
+3. **Most jersey models are per-digit detectors**, not number classifiers: "23"
+   comes back as two boxes, class `2` at x=44 and class `3` at x=111, in
+   arbitrary order. `src/jersey.py` sorts by x and concatenates, and takes the
+   *weakest* digit's confidence as the number's confidence. Classification
+   models (where `predictions` is a dict) are handled too.
+
+> **Latency is the real constraint.** The hosted endpoint measures **2.6–6.8 s
+> per crop**. At `ocr_interval: 3` with six players, a 26k-frame game issues
+> tens of thousands of calls — days of wall clock. Use the hosted endpoint only
+> with `--max-frames`. For anything longer, serve the model locally:
+>
+> ```bash
+> docker run -d --gpus all -p 9001:9001 roboflow/roboflow-inference-server-gpu
+> ```
+> then `--roboflow-url http://localhost:9001`. Same model, same API, ~20–50 ms
+> per call, no quota, and no frames leaving your machine.
+
+`jersey.skip_locked_tracks` (default true) stops calling OCR for a track once
+its number has locked. Leave it on — it is the single biggest reduction in call
+volume, and further calls can only re-confirm what is already known.
+`jersey.max_ocr_calls` caps the total per run as a safety net for metered
+backends.
+
+### When no number appears at all
+
+Run with `--dump-jersey-crops /tmp/crops` and **look at the images**. Nothing
+else distinguishes the two failure modes, and they have opposite fixes:
+
+| What the crops look like | Meaning | Fix |
+|---|---|---|
+| Directory is empty | Everything was gated out | Lower `min_box_width` / `min_box_height` |
+| Digits legible to you, filenames say `none` | The recognizer is too weak | Switch `jersey.backend` to `paddleocr` |
+| Digits illegible to you too | Below the resolution floor | No model can read these — zoom the camera, or fall back to ReID-based identity |
+
+The run summary prints a `DIAGNOSIS` line naming which of these three it is.
 
 ---
 

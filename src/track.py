@@ -26,7 +26,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Optional, Sequence
 
-from detect import CLASS_BALL, CLASS_JERSEY, CLASS_PLAYER, CLASS_REFEREE, CLASS_RIM
+from detect import (
+    BASKETBALL_CLASS_NAMES,
+    CLASS_BALL,
+    CLASS_JERSEY,
+    CLASS_PLAYER,
+    CLASS_REFEREE,
+    CLASS_RIM,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -163,14 +170,45 @@ class TrackerConfig:
     half: bool = False
     max_det: int = 60
 
-    #: When True, only player boxes are shown to the multi-object tracker and
-    #: ball/rim/jersey come from a SECOND forward pass. Strictly isolates the
-    #: tracker from non-player classes, at roughly double the inference cost.
-    #: When False (default) a single pass tracks everything and non-player
-    #: classes are filtered out afterwards - one forward pass, but the backend
-    #: sees ball/rim boxes during association.
-    #: NOT MEASURED YET on this footage; worth an experiment.
-    restrict_tracker_to_players: bool = False
+    #: SEPARATE, LOWER confidence threshold for the ball.
+    #:
+    #: A basketball is by far the smallest class here - a few dozen pixels, often
+    #: motion blurred into an ellipse, frequently half occluded by hands. It
+    #: scores much lower than a player-sized box, so a single global ``conf``
+    #: tuned to keep player boxes clean silently removes the ball entirely.
+    #:
+    #: The tracker is therefore run at min(conf, ball_conf) and each class is
+    #: filtered afterwards against its own threshold. NOTE the side effect: the
+    #: MOT backend sees the extra low-confidence boxes during association. For
+    #: ByteTrack-family backends that is by design (their second association
+    #: stage exists to use low-score detections); the kept PLAYER boxes are
+    #: unchanged because they are re-filtered at ``conf`` immediately after.
+    ball_conf: float = 0.10
+
+    #: When True, only player boxes reach the multi-object tracker and
+    #: ball/rim/jersey/referee come from a SECOND forward pass.
+    #:
+    #: DEFAULT CHANGED TO TRUE after measuring what False actually does. It is
+    #: not a cost/quality trade-off; False breaks two things outright:
+    #:
+    #: 1. THE BALL DISAPPEARS. Ultralytics trackers only emit CONFIRMED tracks,
+    #:    and a track can only be initiated by a detection scoring at least
+    #:    ``new_track_thresh`` (0.25 in bytetrack.yaml). A ball at 0.12 is
+    #:    demoted to a low-score detection usable only for matching EXISTING
+    #:    tracks, so it can never start one. Lowering ``conf`` or ``ball_conf``
+    #:    cannot help - the gate is inside the tracker, not here. Observed
+    #:    result: the ball appeared in exactly one frame of a 400-frame run.
+    #:
+    #: 2. TRACK IDS INFLATE. With classes=None the backend assigns ids to ball,
+    #:    rim AND jersey boxes from the same counter as players. Six players
+    #:    plus ~six jersey boxes plus rim and ball per frame pushes ids past 80
+    #:    within a few hundred frames, which is what put "id:81" on screen for a
+    #:    court holding six people.
+    #:
+    #: True costs a second forward pass (roughly 2x inference). That is the
+    #: price of a detected ball and a small id space, and it buys back the
+    #: jersey/ball behaviour the rest of the pipeline assumes.
+    restrict_tracker_to_players: bool = True
 
     #: Directory for derived tracker YAMLs written when with_reid is enabled.
     #: Relative to the working directory; never written inside site-packages.
@@ -422,41 +460,128 @@ class Tracker:
             max_distance=self.config.ball_max_distance,
             max_lost_frames=self.config.ball_max_lost_frames,
         )
+        #: Raw detections seen per class id, before any role filtering. The
+        #: pipeline prints this: "ball: 0" is the difference between "the
+        #: detector never saw a ball" and "the ball tracker dropped it", which
+        #: are completely different bugs.
+        self.class_detection_counts: dict[int, int] = {}
+
         LOGGER.info(
             "Tracker ready: backend=%s reid=%s weights=%s",
             self.backend_name,
             self.reid_active,
             self.weights.name,
         )
+        self._check_class_scheme()
+
+    def _check_class_scheme(self) -> None:
+        """Warn when the checkpoint's classes are not the basketball scheme.
+
+        THIS CHECK USED TO BE UNREACHABLE. An equivalent lives in
+        ``detect.Detector``, but the pipeline never constructs a ``Detector`` -
+        it goes through this class, which calls ``YOLO()`` directly. Only
+        scripts/smoke_test.py built a Detector, so a checkpoint with a different
+        class order (or the older 4-class scheme with no referee) ran the whole
+        pipeline with ball/rim/jersey silently misfiled or empty, and printed
+        nothing to say so.
+
+        Deliberately a warning, not an error: ``require_basketball_classes`` on
+        DetectorConfig governs hard failure, and this class does not own that
+        setting. The point here is that the mismatch is IMPOSSIBLE TO MISS.
+        """
+        names = getattr(self.model, "names", {}) or {}
+        if isinstance(names, (list, tuple)):
+            names = {int(i): str(v) for i, v in enumerate(names)}
+        else:
+            names = {int(k): str(v) for k, v in names.items()}
+        self.class_names: dict[int, str] = names
+
+        LOGGER.info("Detector classes in %s: %s", self.weights.name, names)
+
+        lowered = {idx: name.lower() for idx, name in names.items()}
+        missing = {
+            idx: expected
+            for idx, expected in BASKETBALL_CLASS_NAMES.items()
+            if lowered.get(idx) != expected
+        }
+        if not missing:
+            return
+
+        LOGGER.warning(
+            "CLASS SCHEME MISMATCH in '%s'.\n"
+            "  expected: %s\n"
+            "  found:    %s\n"
+            "  wrong/missing at: %s\n"
+            "Any class not at its expected index is filed under the WRONG role, "
+            "so ball / rim / jersey / referee output will be empty or nonsense. "
+            "Retrain against train/basketball.yaml, or fix the class order.",
+            self.weights.name,
+            BASKETBALL_CLASS_NAMES,
+            names,
+            missing,
+        )
+
+    @property
+    def _detection_conf(self) -> float:
+        """Threshold for the DETECTION pass: low enough to keep the ball.
+
+        Deliberately NOT used for the tracking pass. The tracker only ever sees
+        players now, and handing it marginal 0.10-confidence boxes would create
+        and drop more tracks - i.e. more id churn, which is precisely the
+        problem the roster cap exists to contain. The ball needs the low
+        threshold; the tracker needs a clean one.
+        """
+        return min(float(self.config.conf), float(self.config.ball_conf))
+
+    def _filter_by_class_conf(self, objects: list[TrackedObject]) -> list[TrackedObject]:
+        """Apply each class's own threshold after a single low-conf pass.
+
+        Without this, running the model at ball_conf would flood every other
+        class with junk boxes. Player/rim/jersey/referee are held to ``conf``
+        exactly as before; only the ball gets the lower bar.
+        """
+        player_conf = float(self.config.conf)
+        ball_conf = float(self.config.ball_conf)
+        kept: list[TrackedObject] = []
+        for obj in objects:
+            threshold = ball_conf if obj.class_id == CLASS_BALL else player_conf
+            if obj.confidence >= threshold:
+                kept.append(obj)
+        return kept
 
     def _track_call(self, frame: "np.ndarray", classes: Optional[Sequence[int]]) -> list[TrackedObject]:
-        results = self.model.track(
-            frame,
-            persist=self.config.persist,
-            tracker=str(self.tracker_path),
-            conf=self.config.conf,
-            iou=self.config.iou,
-            imgsz=self.config.imgsz,
-            device=self.config.device,
-            half=self.config.half,
-            max_det=self.config.max_det,
-            classes=list(classes) if classes is not None else None,
-            verbose=False,
-        )
+        kwargs = {
+            "persist": self.config.persist,
+            "tracker": str(self.tracker_path),
+            # The tracker's own threshold, NOT the ball-lowered one.
+            "conf": self.config.conf,
+            "iou": self.config.iou,
+            "imgsz": self.config.imgsz,
+            "device": self.config.device,
+            "max_det": self.config.max_det,
+            "classes": list(classes) if classes is not None else None,
+            "verbose": False,
+        }
+        # Ultralytics 8.4 deprecates the `half` argument. Omit it for the
+        # default FP32 path instead of emitting the same warning every frame.
+        if self.config.half:
+            kwargs["half"] = True
+        results = self.model.track(frame, **kwargs)
         return _to_tracked_objects(results)
 
     def _predict_call(self, frame: "np.ndarray", classes: Sequence[int]) -> list[TrackedObject]:
-        results = self.model.predict(
-            frame,
-            conf=self.config.conf,
-            iou=self.config.iou,
-            imgsz=self.config.imgsz,
-            device=self.config.device,
-            half=self.config.half,
-            max_det=self.config.max_det,
-            classes=list(classes),
-            verbose=False,
-        )
+        kwargs = {
+            "conf": self._detection_conf,
+            "iou": self.config.iou,
+            "imgsz": self.config.imgsz,
+            "device": self.config.device,
+            "max_det": self.config.max_det,
+            "classes": list(classes),
+            "verbose": False,
+        }
+        if self.config.half:
+            kwargs["half"] = True
+        results = self.model.predict(frame, **kwargs)
         return _to_tracked_objects(results)
 
     def update(self, frame: "np.ndarray", frame_idx: int, timestamp_sec: float) -> FrameTracks:
@@ -475,6 +600,14 @@ class Tracker:
             objects = tracked + others
         else:
             objects = self._track_call(frame, classes=None)
+
+        # Count BEFORE filtering, so the summary can distinguish "the detector
+        # never proposed a ball" from "the ball was proposed and then dropped".
+        for obj in objects:
+            self.class_detection_counts[obj.class_id] = (
+                self.class_detection_counts.get(obj.class_id, 0) + 1
+            )
+        objects = self._filter_by_class_conf(objects)
 
         # Role split by exact class id. CLASS_REFEREE (4) matches none of these
         # four branches, so referees are DROPPED HERE BY DESIGN and never reach

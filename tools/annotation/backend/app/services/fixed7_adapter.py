@@ -1,3 +1,18 @@
+"""[已停用 2026-09] 出框统一由 basketball-v2 的 mine 提供。
+
+两个诊断端点（GET /recognition/fixed7-check、POST
+/videos/{id}/fixed7-dry-run）已从 routes.py 摘掉。模块保留在磁盘上，
+tests/test_fixed7_adapter.py 仍然直接测这里的函数，不经过 HTTP。
+
+停用原因：它指向的是**第三个**仓库（SPORT_CV_ROOT/Sport-CV），带着又一套
+球衣框几何 —— estimate_jersey_bbox() 的 20%/14%/20%/58%，与推理基准
+（20%/15%/20%/55%）IoU 0.87。四套几何同时存在、由「点了哪个按钮」决定谁在跑，
+本身就是这次要消除的东西，即使这一套最接近基准也一样停。
+
+现在的通路：
+    jersey_train mine  ->  crops/ + manifest.jsonl  ->  scripts/import_crops.py
+"""
+
 from __future__ import annotations
 
 import importlib.util

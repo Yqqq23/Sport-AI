@@ -1,0 +1,134 @@
+{
+  "meta": {
+    "input_video": "D:\\basketball-v2\\3 v 3 Basketball Game Side A 24022026.mp4",
+    "frame_idx": 100,
+    "topdown_template_size": [
+      500,
+      940
+    ],
+    "used_point_names": [
+      "corner_tl",
+      "corner_tr",
+      "corner_br",
+      "corner_bl",
+      "paint_tl",
+      "paint_tr",
+      "paint_br",
+      "paint_bl",
+      "free_throw_center",
+      "three_left_base",
+      "three_right_base",
+      "three_left_break",
+      "three_right_break"
+    ],
+    "skipped_point_names": []
+  },
+  "image_points": {
+    "corner_tl": [
+      679.0,
+      615.0
+    ],
+    "corner_tr": [
+      1165.0,
+      606.0
+    ],
+    "corner_br": [
+      849.0,
+      637.0
+    ],
+    "corner_bl": [
+      1064.0,
+      627.0
+    ],
+    "paint_tl": [
+      1046.0,
+      699.0
+    ],
+    "paint_tr": [
+      607.0,
+      756.0
+    ],
+    "paint_br": [
+      1204.0,
+      745.0
+    ],
+    "paint_bl": [
+      661.0,
+      806.0
+    ],
+    "free_throw_center": [
+      1201.0,
+      801.0
+    ],
+    "three_left_base": [
+      428.0,
+      1063.0
+    ],
+    "three_right_base": [
+      1547.0,
+      1062.0
+    ],
+    "three_left_break": [
+      18.0,
+      1064.0
+    ],
+    "three_right_break": [
+      1892.0,
+      1051.0
+    ]
+  },
+  "court_points": {
+    "corner_tl": [
+      32.0,
+      32.0
+    ],
+    "corner_tr": [
+      468.0,
+      32.0
+    ],
+    "corner_br": [
+      468.0,
+      908.0
+    ],
+    "corner_bl": [
+      32.0,
+      908.0
+    ],
+    "paint_tl": [
+      178.78666666666666,
+      446.1090909090909
+    ],
+    "paint_tr": [
+      321.2133333333333,
+      446.1090909090909
+    ],
+    "paint_br": [
+      321.2133333333333,
+      908.0
+    ],
+    "paint_bl": [
+      178.78666666666666,
+      908.0
+    ],
+    "free_throw_center": [
+      250.0,
+      446.1090909090909
+    ],
+    "three_left_base": [
+      58.160000000000004,
+      908.0
+    ],
+    "three_right_base": [
+      441.84,
+      908.0
+    ],
+    "three_left_break": [
+      58.160000000000004,
+      669.8795344770691
+    ],
+    "three_right_break": [
+      441.84,
+      669.8795344770691
+    ]
+  }
+}

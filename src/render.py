@@ -29,6 +29,8 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
+from identity import Identity, identity_color
+
 
 # --------------------------------------------------------------------------
 # Shared frame data structure (used by BOTH renderers)
@@ -46,6 +48,33 @@ class PlayerRender:
     conf: float = 0.0
     # Court-canvas coordinates from calib.CourtProjector (bottom-edge midpoint).
     court_xy: Optional[tuple[float, float]] = None
+    #: Stable player identity from src/identity.py. When present it supplies
+    #: both the label and the colour, and it - not ``track_id`` - is what the
+    #: top-down trail is keyed on, so a trail survives a tracker id switch.
+    identity: Optional[Identity] = None
+
+    @property
+    def render_key(self) -> Any:
+        """Key for per-player state (trails). Identity first, track id second."""
+        return self.identity.key if self.identity is not None else self.track_id
+
+    @property
+    def label(self) -> str:
+        """Jersey number when known, else the raw tracker id."""
+        if self.identity is not None:
+            return self.identity.label
+        return f"#{self.jersey_number}" if self.jersey_number else f"id:{self.track_id}"
+
+    def color(self) -> tuple[int, int, int]:
+        """Per-player colour.
+
+        Identity-derived when available. The ``team_id`` path below is the
+        legacy fallback and is effectively dead: nothing in this pipeline ever
+        assigns a team, so it always resolved to ``TEAM_COLOR[None]`` grey.
+        """
+        if self.identity is not None:
+            return identity_color(self.identity)
+        return TEAM_COLOR.get(self.team_id, TEAM_COLOR[None])
 
 
 @dataclass
@@ -327,12 +356,16 @@ class TrailHistory:
     def __init__(self, trail_length: int = 30, alpha: float = 0.5) -> None:
         self.trail_length = int(trail_length)
         self.alpha = float(alpha)
-        self.smoothed_points: dict[int, tuple[float, float]] = {}
-        self.track_history_2d: dict[int, deque] = {}
+        # Keyed by any hashable. The pipeline passes an identity key (a string
+        # like "jersey:7") rather than a tracker id, so the trail of a player
+        # who was occluded and re-acquired under a new id continues instead of
+        # restarting - see src/identity.py.
+        self.smoothed_points: dict[Any, tuple[float, float]] = {}
+        self.track_history_2d: dict[Any, deque] = {}
 
     def update(
         self,
-        track_id: int,
+        track_id: Any,
         projected_point: Optional[tuple[float, float] | list[float]],
         projection_valid: bool = True,
     ) -> Optional[list[float]]:
@@ -351,7 +384,7 @@ class TrailHistory:
         history.append(smoothed)
         return [float(smoothed[0]), float(smoothed[1])]
 
-    def get(self, track_id: int) -> list[tuple[float, float]]:
+    def get(self, track_id: Any) -> list[tuple[float, float]]:
         return list(self.track_history_2d.get(track_id, ()))
 
 
@@ -396,18 +429,33 @@ def render_annotated_frame(
         if not bbox:
             continue
         x1, y1, x2, y2 = [int(v) for v in bbox]
-        color = TEAM_COLOR.get(player.team_id, TEAM_COLOR[None])
+        color = player.color()
         cv2.rectangle(out, (x1, y1), (x2, y2), color, line_width)
 
-        number = player.jersey_number
-        label = f"#{number}" if number else f"id:{player.track_id}"
+        # A jersey number is the useful label, so give it a filled plate and a
+        # larger font rather than thin coloured text over a busy court, which
+        # was illegible at 1080p once the box colour matched the kit.
+        label = player.label
+        confirmed = player.identity is not None and player.identity.is_confirmed
+        scale = 0.62 if confirmed else 0.46
+        (text_w, text_h), baseline = cv2.getTextSize(
+            label, cv2.FONT_HERSHEY_SIMPLEX, scale, 2
+        )
+        plate_top = max(0, y1 - text_h - baseline - 6)
+        cv2.rectangle(
+            out,
+            (x1, plate_top),
+            (x1 + text_w + 8, plate_top + text_h + baseline + 6),
+            color,
+            -1,
+        )
         cv2.putText(
             out,
             label,
-            (x1, max(20, y1 - 8)),
+            (x1 + 4, plate_top + text_h + 2),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.52,
-            color,
+            scale,
+            (16, 16, 16),
             2,
             cv2.LINE_AA,
         )
@@ -473,50 +521,102 @@ def render_topdown_frame(
     data: FrameRenderData,
     trails: TrailHistory,
     config: CourtRenderConfig,
+    #: Accepted and ignored. The ball trail was removed (see below); the
+    #: parameter stays so existing callers keep working.
     ball_trail: Optional[deque] = None,
 ) -> np.ndarray:
     """Output 2: players as dots on the court template, with motion trails.
 
-    Transcribed from ``TopdownRenderer.render``
-    (SRC_A/0619/render.py:53-88): same team colour map, same polyline trail,
-    same filled circle, same label offset (+8, -8) / scale 0.42, same ball
-    colour and radius, same bottom-left timestamp.
+    Structure follows ``TopdownRenderer.render`` (SRC_A/0619/render.py:53-88):
+    filled circle per player, polyline trail, ball dot, bottom-left timestamp.
 
-    Difference: trail points come from ``TrailHistory`` (EMA-smoothed, salvaged
-    from the topdown script) instead of 0619's raw un-smoothed append. The A3
-    brief asked for both sources; EMA smoothing is the strictly better of the
-    two and is itself salvaged code, not new logic.
+    Three deliberate departures from the source:
+
+    1. trail points come from ``TrailHistory`` (EMA-smoothed, salvaged from the
+       topdown script) instead of 0619's raw un-smoothed append;
+    2. the source's team colour map is gone. Nothing in this pipeline assigns a
+       team, so every player took the ``None`` entry and the entire top-down
+       view rendered in one light grey - players, trails and all. Colour now
+       comes from ``identity_color`` and is keyed on the jersey number;
+    3. trails are keyed on identity, not tracker id, so a trail continues
+       across an id switch instead of restarting as a new stub.
     """
     scene = court_template.copy()
-    team_colors = {0: (50, 180, 50), 1: (50, 120, 240), None: (210, 210, 210)}
+    # Trails are drawn on their own layer so the whole tail can be blended back
+    # at one alpha. Drawing them straight onto the court at full opacity made
+    # 30 frames of history as visually loud as the player's current position.
+    trail_layer = scene.copy()
+    drew_trail = False
+    # Dots and labels are collected here and drawn AFTER the trail layer is
+    # blended in, so the blend cannot wash them out.
+    markers: list[tuple[int, int, tuple[int, int, int], str]] = []
 
     for player in data.players:
         point = player.court_xy
         if point is None:
             continue
-        smoothed = trails.update(player.track_id, point)
+        key = player.render_key
+        smoothed = trails.update(key, point)
         if smoothed is None:
             continue
         px, py = int(round(smoothed[0])), int(round(smoothed[1]))
-        color = team_colors.get(player.team_id, team_colors[None])
+        color = player.color()
+        markers.append((px, py, color, player.label))
 
-        pts = np.asarray([[int(x), int(y)] for x, y in trails.get(player.track_id)], dtype=np.int32)
-        if len(pts) >= 2:
-            cv2.polylines(scene, [pts.reshape(-1, 1, 2)], False, color, config.trail_thickness, cv2.LINE_AA)
+        # Taper the tail: oldest segment hairline, newest at full thickness.
+        # Direction of travel is then readable from a still frame, which a
+        # constant-width polyline does not give you.
+        history = trails.get(key)
+        if len(history) >= 2:
+            drew_trail = True
+            segments = len(history) - 1
+            for i in range(segments):
+                age = (i + 1) / segments  # 0 = oldest, 1 = newest
+                thickness = max(1, int(round(config.trail_thickness * age)))
+                cv2.line(
+                    trail_layer,
+                    (int(history[i][0]), int(history[i][1])),
+                    (int(history[i + 1][0]), int(history[i + 1][1])),
+                    color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+
+    if drew_trail:
+        cv2.addWeighted(trail_layer, 0.65, scene, 0.35, 0.0, dst=scene)
+
+    for px, py, color, label in markers:
+        # White ring first: guarantees the dot separates from both the light
+        # court and a same-hue trail passing underneath it.
+        cv2.circle(scene, (px, py), config.player_radius + 2, (255, 255, 255), -1, cv2.LINE_AA)
         cv2.circle(scene, (px, py), config.player_radius, color, -1, cv2.LINE_AA)
 
-        number = player.jersey_number
-        label = f"#{number}" if number else f"id:{player.track_id}"
-        cv2.putText(scene, label, (px + 8, py - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 2, cv2.LINE_AA)
+        # Dark text on the player's own colour: readable over both the light
+        # court and the dark out-of-bounds background.
+        (text_w, text_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
+        tx, ty = px + config.player_radius + 4, py - config.player_radius - 2
+        cv2.rectangle(
+            scene,
+            (tx - 3, ty - text_h - 3),
+            (tx + text_w + 3, ty + baseline),
+            color,
+            -1,
+        )
+        cv2.putText(
+            scene, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (16, 16, 16), 1, cv2.LINE_AA
+        )
 
     if data.ball is not None and data.ball.court_xy is not None:
+        # NO BALL TRAIL. It was removed on purpose: the ball's projected path is
+        # the least trustworthy thing on this canvas. The homography is fitted
+        # to points ON THE FLOOR, and a ball in flight is metres above it, so
+        # every airborne frame projects to a position that is simply wrong -
+        # the "trajectory" was mostly projection error, drawn confidently.
+        # A single dot for "the ball is here, on the ground plane" is the most
+        # this view can honestly claim.
         bx, by = int(round(data.ball.court_xy[0])), int(round(data.ball.court_xy[1]))
-        if ball_trail is not None:
-            ball_trail.append((bx, by))
-            pts = np.asarray([[int(x), int(y)] for x, y in ball_trail], dtype=np.int32)
-            if len(pts) >= 2:
-                cv2.polylines(scene, [pts.reshape(-1, 1, 2)], False, BALL_COLOR, 2, cv2.LINE_AA)
-        cv2.circle(scene, (bx, by), 6, BALL_COLOR, -1, cv2.LINE_AA)
+        cv2.circle(scene, (bx, by), 7, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(scene, (bx, by), 5, BALL_COLOR, -1, cv2.LINE_AA)
 
     cv2.putText(
         scene,
