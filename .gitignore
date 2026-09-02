@@ -8,9 +8,21 @@
 *.engine
 *.torchscript
 
+# Cached ImageNet backbone weights: downloaded once into the checkout so the
+# GPU server trains fully offline. Reproducible from torchvision, so not
+# versioned - but it must be copied to the server alongside the code.
+.torch_home/
+checkpoints/
+
 # --- Datasets ------------------------------------------------------------
 datasets/
 train/datasets/
+# Written by scripts/gen_synthetic.py and the SVHN / SoccerNet downloaders.
+# All regenerable; the debug contact sheets are review artifacts, not source.
+data/synthetic/
+data/svhn/
+data/soccernet/
+data/debug/
 *.mp4
 *.avi
 *.mov
