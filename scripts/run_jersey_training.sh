@@ -31,8 +31,12 @@ launch() {
   local name="$1"; shift
   local log="logs/${name}.log"
 
-  if pgrep -f "$1 $2" >/dev/null 2>&1; then
-    echo "REFUSING: something matching '$1 $2' is already running."
+  # "$*" rather than "$1 $2": stage3's call passes only ONE arg after the
+  # name (no --download-style extra flag), and "$2" under set -u aborts the
+  # whole script with "unbound variable" when it doesn't exist - exactly
+  # what happened here. "$*" works for any argument count.
+  if pgrep -f "$*" >/dev/null 2>&1; then
+    echo "REFUSING: something matching '$*' is already running."
     echo "Two runs writing one checkpoint corrupt each other silently."
     exit 1
   fi
