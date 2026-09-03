@@ -1,0 +1,23 @@
+# Dependencies for jersey-number training. Nothing else.
+#
+# Deliberately ABSENT, because this package never runs a pipeline or serves a
+# page: fastapi, pydantic, uvicorn, sqlalchemy (annotation backend), ultralytics
+# and opencv-python (detection/tracking), and every video codec binding. If a
+# change here starts needing one of those, the change belongs in basketball-v2
+# rather than in this package.
+
+torch>=2.0
+torchvision>=0.15
+
+# Pillow does the rendering and every image-space degradation; numpy does the
+# confusion matrices and the occlusion masks. Both arrive with torchvision
+# anyway - pinned here so this file describes the real dependency set rather
+# than relying on a transitive install.
+numpy>=1.24
+Pillow>=9.5
+
+# Needed ONLY by scripts/download_soccernet.py, and only on the one run that
+# fetches the data. Nothing under train/ imports it, so stages 1 and 2 work on
+# a machine where this line was never installed - which is the fallback if the
+# NDA form is still pending.
+SoccerNet>=0.1.50

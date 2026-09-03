@@ -1,4 +1,34 @@
-"""Train the local jersey-number classifier.
+# =============================================================================
+# DEPRECATED - THIS MODULE RAISES ON IMPORT. DO NOT USE IT.
+#
+# This is the old 41-class CLOSED-SET classifier. Its central premise - that
+# the set of jersey numbers is known ahead of time and can be enumerated as a
+# class list - is false.
+#
+# The number set is OPEN. FIBA 3x3 allows 0, 00 and 1-99: 101 legal numbers,
+# four players per team, no duplicates within a team. Any one match shows eight
+# of them and a different eight the next match. A model with a fixed class list
+# cannot name a number outside that list, and one given all 101 classes leaves
+# 93 of them with zero training examples - where an untrained logit still wins
+# an argmax sometimes, manufacturing confident predictions for numbers the
+# model has never seen.
+#
+# REPLACEMENT: train/jersey_net.py - a per-digit model. Three heads (length,
+# digit1, digit2) on a shared trunk, so an image labelled "23" trains both
+# "this is a 2" and "this is a 3", and any of the 101 legal numbers can be
+# emitted without ever having appeared in training. Whole numbers are
+# reassembled downstream by accumulating per-digit probabilities across frames.
+#
+# The file is kept rather than deleted because its augmentation docstrings
+# record why RandomDownscale and the flip ban exist, and that reasoning carried
+# forward into train/augment.py. It is a document now, not code.
+#
+# The raise below is deliberate and is not a placeholder. A comment stops
+# nobody - not a colleague skimming the tree, not an agent grepping for
+# "train jersey". Only an exception does.
+# =============================================================================
+
+"""Train the local jersey-number classifier.  [DEPRECATED - see header above]
 
     python train/train_jersey.py --data data/jersey_ocr --epochs 40
 
@@ -46,6 +76,32 @@ almost every default augmentation recipe and it is wrong here.
 """
 
 from __future__ import annotations
+
+DEPRECATED = """\
+train/train_jersey.py is DEPRECATED and must not be used.
+
+It is the old 41-class closed-set jersey classifier. The jersey number set is
+OPEN - FIBA 3x3 allows 0, 00 and 1-99 (101 legal numbers) - so a fixed class
+list cannot name a number it was not trained on, and padding the list out to
+101 classes leaves 93 of them untrained but still able to win an argmax.
+
+Use the per-digit model instead:
+
+    train/jersey_net.py        JerseyNet - length / digit1 / digit2 heads
+    train/pretrain_svhn.py     stage 1
+    train/finetune_soccernet.py stage 3
+
+An image labelled "23" trains both "this is a 2" and "this is a 3", so every
+sample contributes to all ten digit shapes and any legal number can be emitted
+without ever having appeared in training.
+
+--
+train/train_jersey.py 已废弃,请勿使用。
+此模块为已废弃的 41 类闭集分类器,号码集合是开放的(FIBA 3x3 允许 0/00/1-99),
+请改用 train/jersey_net.py 的逐位数字模型。
+"""
+
+raise RuntimeError(DEPRECATED)
 
 import argparse
 import json
@@ -246,6 +302,12 @@ def evaluate(model, loader, device, classes) -> tuple[float, dict[str, float]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the jersey number classifier")
+    # Second guard, and not redundant. The module-level raise is what actually
+    # fires today; this one survives someone deleting that line to "just run it
+    # once" - which is precisely how a deprecated closed-set model gets trained
+    # and quietly shipped.
+    raise RuntimeError(DEPRECATED)
+
     parser.add_argument("--data", type=Path, default=Path("data/jersey_ocr"))
     parser.add_argument("--out", type=Path, default=Path("train/jersey_classifier.pt"))
     parser.add_argument("--epochs", type=int, default=40)

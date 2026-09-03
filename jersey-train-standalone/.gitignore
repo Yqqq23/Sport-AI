@@ -1,0 +1,13 @@
+# Everything this package produces is regenerable, so none of it is versioned.
+# Keeping it out also means the directory can be tarred and uploaded as-is
+# without dragging gigabytes of dataset along.
+
+.torch_home/
+checkpoints/
+logs/
+data/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
