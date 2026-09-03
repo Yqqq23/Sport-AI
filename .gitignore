@@ -20,9 +20,11 @@ train/datasets/
 # Written by scripts/gen_synthetic.py and the SVHN / SoccerNet downloaders.
 # All regenerable; the debug contact sheets are review artifacts, not source.
 data/synthetic/
+data/synthetic_preview/
 data/svhn/
 data/soccernet/
 data/debug/
+logs/
 *.mp4
 *.avi
 *.mov
