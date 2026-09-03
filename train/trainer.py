@@ -58,8 +58,15 @@ def train_model(
     log_file: str | Path | None = None,
     log_every: int = 50,
     extra_sidecar: dict | None = None,
+    diagnostic_loaders: dict | None = None,
 ):
-    """Train, validate each epoch, keep the best checkpoint. Returns the best result."""
+    """Train, validate each epoch, keep the best checkpoint. Returns the best result.
+
+    ``val_loader`` selects the checkpoint. ``diagnostic_loaders`` are scored and
+    logged but deliberately cannot influence selection - stage 3 uses that to
+    watch synthetic performance without letting a rendered-font score decide
+    which weights ship.
+    """
     out_path = Path(out_path)
     log_file = Path(log_file) if log_file else None
     if log_file:
@@ -132,6 +139,16 @@ def train_model(
             f"({time.time() - started:.0f}s)",
             log_file,
         )
+
+        for name, loader in (diagnostic_loaders or {}).items():
+            diagnostic = evaluate(model, loader, device, criterion)
+            _log(
+                f"[epoch {epoch}] {name}: metric={diagnostic.selection_metric:.4f} "
+                f"digit1={diagnostic.f1_digit1:.4f} digit2={diagnostic.f1_digit2:.4f} "
+                f"length={diagnostic.f1_length:.4f} exact={diagnostic.exact_match:.4f} "
+                f"(diagnostic only)",
+                log_file,
+            )
 
         if metric > best_metric:
             best_metric, best_result = metric, result
