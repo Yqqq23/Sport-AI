@@ -32,7 +32,7 @@ import torch
 from PIL import Image
 
 from augment import build_transforms
-from jersey_data import SoccerNetJersey, SyntheticJersey, save_contact_sheet
+from jersey_data import SoccerNetJersey, SyntheticJersey, save_contact_sheet, torso_crop
 from jersey_net import INPUT_SIZE, MEAN, STD
 
 REPO = Path(__file__).resolve().parent.parent
@@ -98,30 +98,39 @@ def q1_geometry(sn: SoccerNetJersey, syn: SyntheticJersey) -> None:
     print(f"  thing the model is supposed to read, before any augmentation.")
 
 
-def q1_sheets(sn: SoccerNetJersey, syn: SyntheticJersey, out_dir: Path) -> None:
-    """Render both datasets exactly as the network receives them.
+def as_model_sees(dataset, n=20, train=False):
+    """Post-transform, de-normalized samples - what the tensor actually holds.
 
-    Post-transform and de-normalized, so the grids show the tensor contents
-    rather than the files on disk. If these two sheets look like different
-    tasks, they are different tasks.
+    Shared by every sheet in this file so a reviewer compares tensor contents,
+    not files on disk: if a sheet looks wrong, the model saw exactly that.
     """
     mean = torch.tensor(MEAN).view(3, 1, 1)
     std = torch.tensor(STD).view(3, 1, 1)
+    dataset.transform = build_transforms(train)
+    picks = random.Random(1).sample(range(len(dataset)), n)
+    out = []
+    for i in picks:
+        tensor, length, d1, d2 = dataset[i]
+        array = ((tensor * std + mean).clamp(0, 1) * 255).byte().permute(1, 2, 0).numpy()
+        label = "unclear" if length == 0 else (f"{d1}" if length == 1 else f"{d1}{d2}")
+        out.append((Image.fromarray(array), label))
+    return out
 
-    def as_model_sees(dataset, n=20, train=False):
-        dataset.transform = build_transforms(train)
-        picks = random.Random(1).sample(range(len(dataset)), n)
-        out = []
-        for i in picks:
-            tensor, length, d1, d2 = dataset[i]
-            array = ((tensor * std + mean).clamp(0, 1) * 255).byte().permute(1, 2, 0).numpy()
-            label = "unclear" if length == 0 else (f"{d1}" if length == 1 else f"{d1}{d2}")
-            out.append((Image.fromarray(array), label))
-        return out
 
+def q1_sheets(
+    sn_after: SoccerNetJersey, sn_before: SoccerNetJersey, syn: SyntheticJersey, out_dir: Path
+) -> None:
+    """Render every dataset variant exactly as the network receives it.
+
+    ``sn_before``/``sn_after`` share the same tracklet sampling (same seed,
+    same frames_per_tracklet), so index i is the SAME source frame in both -
+    an apples-to-apples before/after for the torso-crop fix, not two random
+    draws that happen to differ.
+    """
     for name, dataset, train in (
-        ("soccernet_val", sn, False),
-        ("soccernet_train_aug", sn, True),
+        ("soccernet_BEFORE_wholebody_val", sn_before, False),
+        ("soccernet_AFTER_torsocrop_val", sn_after, False),
+        ("soccernet_AFTER_torsocrop_train_aug", sn_after, True),
         ("synthetic_val", syn, False),
         ("synthetic_train_aug", syn, True),
     ):
@@ -231,39 +240,60 @@ def _stats(image: Image.Image) -> dict:
 
 
 def q3_statistics(sn: SoccerNetJersey, syn: SyntheticJersey) -> None:
+    """Brightness/contrast/gradient/high-freq, whole-body vs torso-cropped vs synthetic.
+
+    Computed straight from disk, torso_crop applied in-process for the "after"
+    column - this measures the geometry fix in isolation from any change to
+    the synthetic side, so a shrinking gap here is attributable to the crop.
+    """
     rule("Q3  Image statistics, 200 samples each")
 
     rng = random.Random(2)
     sn_rows = rng.sample(sn.rows, min(SAMPLE_N, len(sn.rows)))
     syn_rows = rng.sample(syn.rows, min(SAMPLE_N, len(syn.rows)))
 
-    collected = {"SoccerNet": [], "synthetic": []}
+    collected = {"SoccerNet (whole body)": [], "SoccerNet (torso crop)": [], "synthetic": []}
     for row in sn_rows:
         with Image.open(row["image"]) as im:
-            collected["SoccerNet"].append(_stats(im.convert("RGB")))
+            whole = im.convert("RGB")
+            collected["SoccerNet (whole body)"].append(_stats(whole))
+            collected["SoccerNet (torso crop)"].append(_stats(torso_crop(whole)))
     for row in syn_rows:
         with Image.open(syn.root / row["image"]) as im:
             collected["synthetic"].append(_stats(im.convert("RGB")))
 
     keys = ("brightness", "contrast", "gradient", "high_freq")
-    print(f"\n{'metric':<12}{'SoccerNet':>22}{'synthetic':>22}{'ratio':>10}")
-    print(f"{'':12}{'mean +/- sd':>22}{'mean +/- sd':>22}{'syn/sn':>10}")
-    print("-" * 66)
+    cols = list(collected.keys())
+    print(f"\n{'metric':<12}" + "".join(f"{c:>26}" for c in cols))
+    print(f"{'':12}" + "".join(f"{'mean +/- sd':>26}" for c in cols))
+    print("-" * (12 + 26 * len(cols)))
 
+    values = {c: {k: np.array([s[k] for s in collected[c]]) for k in keys} for c in cols}
     for key in keys:
-        a = np.array([s[key] for s in collected["SoccerNet"]])
-        b = np.array([s[key] for s in collected["synthetic"]])
-        ratio = b.mean() / a.mean() if a.mean() else float("nan")
-        print(f"{key:<12}{a.mean():11.4f} +/-{a.std():7.4f}"
-              f"{b.mean():11.4f} +/-{b.std():7.4f}{ratio:10.2f}")
+        row_text = f"{key:<12}"
+        for c in cols:
+            a = values[c][key]
+            row_text += f"{a.mean():14.4f} +/-{a.std():7.4f}"
+        print(row_text)
+
+    print("\nsynthetic/SoccerNet ratio, whole-body crop vs torso crop:")
+    for key in keys:
+        before = values["SoccerNet (whole body)"][key].mean()
+        after = values["SoccerNet (torso crop)"][key].mean()
+        syn_mean = values["synthetic"][key].mean()
+        ratio_before = syn_mean / before if before else float("nan")
+        ratio_after = syn_mean / after if after else float("nan")
+        moved = "narrowed" if abs(ratio_after - 1) < abs(ratio_before - 1) else "widened"
+        print(f"  {key:<12} before={ratio_before:6.2f}  after={ratio_after:6.2f}  ({moved} toward 1.0)")
 
     print("\nreading this table:")
-    print("  gradient / high_freq much HIGHER for synthetic means the rendered")
-    print("    images still carry detail the real ones do not - the degradation")
-    print("    is not going far enough, or is going to the wrong thing.")
     print("  a large gap in ANY row is a cue the network can use to tell the two")
     print("    sources apart, and a network that can tell them apart is free to")
-    print("    learn two unrelated functions - which is what 0.99 vs 0.27 is.")
+    print("    learn two unrelated functions - which is what 0.99 vs 0.27 was.")
+    print("  the torso crop removes grass/limbs and enlarges the number, so")
+    print("    contrast and brightness are expected to move toward synthetic;")
+    print("    it does NOT change either dataset's degradation pipeline, so it")
+    print("    is not expected to fully close the gap by itself.")
 
 
 # --------------------------------------------------------------------------
@@ -279,20 +309,29 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
 
-    sn = SoccerNetJersey(args.soccernet, split="test", train=False,
-                         frames_per_tracklet=args.frames_per_tracklet)
+    # Same seed and frames_per_tracklet on both, so sn_before.rows[i] and
+    # sn_after.rows[i] are the SAME source frame - crop_torso is the only
+    # variable, which is what makes the before/after sheets a fair comparison.
+    sn_after = SoccerNetJersey(args.soccernet, split="test", train=False,
+                               frames_per_tracklet=args.frames_per_tracklet,
+                               crop_torso=True)
+    sn_before = SoccerNetJersey(args.soccernet, split="test", train=False,
+                                frames_per_tracklet=args.frames_per_tracklet,
+                                crop_torso=False)
     syn = SyntheticJersey(args.synthetic, train=False)
 
-    q1_geometry(sn, syn)
+    q1_geometry(sn_before, syn)
     rule("Q1  Contact sheets - what the network actually receives")
-    q1_sheets(sn, syn, args.out)
+    q1_sheets(sn_after, sn_before, syn, args.out)
     q2_sampling(args.soccernet, args.frames_per_tracklet)
-    q3_statistics(sn, syn)
+    q3_statistics(sn_after, syn)
 
-    rule("LOOK AT THESE TWO FILES SIDE BY SIDE")
-    print(f"  {args.out / 'domain_gap_soccernet_val.png'}")
+    rule("LOOK AT THESE THREE FILES")
+    print(f"  {args.out / 'domain_gap_soccernet_BEFORE_wholebody_val.png'}  (old behaviour)")
+    print(f"  {args.out / 'domain_gap_soccernet_AFTER_torsocrop_val.png'}   (torso-crop fix)")
     print(f"  {args.out / 'domain_gap_synthetic_val.png'}")
-    print("\nIf they do not look like the same task, they are not the same task,")
+    print("\nCompare AFTER to synthetic, not BEFORE - BEFORE is there to show what")
+    print("changed. If AFTER and synthetic still do not look like the same task,")
     print("and no amount of mixing ratio or learning rate will bridge them.")
 
 

@@ -125,6 +125,50 @@ class SyntheticJersey(Dataset, JerseyDatasetMixin):
 # --------------------------------------------------------------------------
 
 
+def torso_crop(
+    image: Image.Image,
+    top_fraction: float = 0.15,
+    bottom_fraction: float = 0.55,
+    width_fraction: float = 0.60,
+    pad_ratio: float = 0.18,
+) -> Image.Image:
+    """Cut the torso band out of a whole-player crop, padded like inference.
+
+    A SoccerNet tracklet frame IS a player detection box, not a number crop -
+    see SoccerNetJersey's docstring for what happens if it is resized to 96x96
+    as-is. This treats the whole image as the "player box" (0, 0, W, H) and
+    reproduces this project's inference-time torso approximation: the number
+    sits in the upper-middle of the torso, below the head and above the waist,
+    so a band from ``top_fraction`` to ``bottom_fraction`` of box height and
+    the middle ``width_fraction`` of box width is kept, then padded by
+    ``pad_ratio`` on each side (matching ``pad_ratio`` in ``src/jersey.py`` -
+    it absorbs localization error the same way there and here).
+
+    Falls back to the full image if the computed band is degenerate (a crop so
+    small width/height rounds to zero pixels) rather than raising - a training
+    run should skip a bad sample, not crash on it three hours in.
+    """
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return image
+
+    center_x = width / 2.0
+    half_width = width * width_fraction / 2.0
+    x1, x2 = center_x - half_width, center_x + half_width
+    y1, y2 = height * top_fraction, height * bottom_fraction
+
+    pad_x = (x2 - x1) * pad_ratio
+    pad_y = (y2 - y1) * pad_ratio
+    x1 = max(0, int(round(x1 - pad_x)))
+    y1 = max(0, int(round(y1 - pad_y)))
+    x2 = min(width, int(round(x2 + pad_x)))
+    y2 = min(height, int(round(y2 + pad_y)))
+
+    if x2 <= x1 or y2 <= y1:
+        return image
+    return image.crop((x1, y1, x2, y2))
+
+
 class SoccerNetJersey(Dataset, JerseyDatasetMixin):
     """SoccerNet jersey-2023 tracklets, flattened to individual frames.
 
@@ -143,6 +187,36 @@ class SoccerNetJersey(Dataset, JerseyDatasetMixin):
     Tracklets labelled -1 become unclear samples and train the length head on
     class 0 - that is the only source of real unreadable examples in the whole
     pipeline, and it is a large one.
+
+    CROPPING TO THE TORSO, NOT THE WHOLE PLAYER
+    --------------------------------------------
+    Each tracklet frame IS a player detection box - a whole body, median
+    H/W ratio 2.02 in this dataset. Handing that straight to a 96x96 resize
+    was the bug diagnose_domain_gap.py was written to find: the number ends up
+    occupying roughly a fifth of the input height (vs 40-60% for synthetic),
+    the resize squeezes it ~2x horizontally because Resize((96,96)) is not
+    aspect-preserving, and most of the frame is grass and limbs the network can
+    use as a free cue for "this is the real-data source" - which is exactly
+    what let stage 3 learn two unrelated functions (0.99 synthetic, 0.27
+    SoccerNet at the same epoch) instead of one that generalises.
+
+    ``torso_*`` reuses this project's OWN inference-time geometry -
+    ``top_fraction=0.15, bottom_fraction=0.55, width_fraction=0.60,
+    pad_ratio=0.18`` from ``src/jersey.py:torso_region_from_player_box`` /
+    ``padded_box`` in basketball-v2 - rather than inventing new constants. The
+    reasoning (number sits upper-middle of the torso, below the head, above
+    the waist) holds for soccer too; only the exact fractions might eventually
+    need retuning for this sport's different pose mix, which is why they are
+    constructor arguments and not hardcoded.
+
+    This is a COPY of that geometry, not an import - this package deliberately
+    shares no code with basketball-v2 (see the repo's stated isolation
+    constraint), so the constants are duplicated here rather than reused
+    across the account boundary. If the inference-side defaults change, this
+    copy needs a matching update; nothing enforces that automatically.
+
+    Pass ``crop_torso=False`` to fall back to the old whole-body behaviour,
+    which exists only so a before/after comparison can be generated on demand.
     """
 
     def __init__(
@@ -152,10 +226,20 @@ class SoccerNetJersey(Dataset, JerseyDatasetMixin):
         train: bool = True,
         frames_per_tracklet: int = 12,
         seed: int = 0,
+        crop_torso: bool = True,
+        torso_top: float = 0.15,
+        torso_bottom: float = 0.55,
+        torso_width: float = 0.60,
+        torso_pad_ratio: float = 0.18,
     ) -> None:
         self.root = Path(root)
         self.transform = build_transforms(train)
         self.rows: list[dict] = []
+        self.crop_torso = crop_torso
+        self.torso_top = torso_top
+        self.torso_bottom = torso_bottom
+        self.torso_width = torso_width
+        self.torso_pad_ratio = torso_pad_ratio
 
         images_dir, gt = self._locate(split)
         rng = random.Random(seed)
@@ -210,6 +294,14 @@ class SoccerNetJersey(Dataset, JerseyDatasetMixin):
     def __getitem__(self, index: int):
         row = self.rows[index]
         image = Image.open(row["image"]).convert("RGB")
+        if self.crop_torso:
+            image = torso_crop(
+                image,
+                top_fraction=self.torso_top,
+                bottom_fraction=self.torso_bottom,
+                width_fraction=self.torso_width,
+                pad_ratio=self.torso_pad_ratio,
+            )
         return self._emit(image, row["number"])
 
     def tracklet_ids(self) -> list[str]:
