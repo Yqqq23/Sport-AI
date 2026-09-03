@@ -1,7 +1,7 @@
 """Stage 2 data: render all 101 legal jersey numbers, then destroy them.
 
-    python scripts/gen_synthetic.py                    # 101 x 500 = 50,500 crops
-    python scripts/gen_synthetic.py --per-number 50    # quick look first
+    python scripts/gen_synthetic.py                    # ~50k crops, length-balanced
+    python scripts/gen_synthetic.py --one-digit-total 200 --two-digit-total 200 --unclear-total 200  # quick look
     python scripts/gen_synthetic.py --list-fonts       # what this box can render
 
 WHY SYNTHETIC DATA IS NOT OPTIONAL HERE
@@ -10,14 +10,42 @@ FIBA 3x3 allows 0, 00 and 1-99 - 101 numbers - and any one match shows eight of
 them. No amount of annotating real footage closes that gap: to see number 87
 the pipeline needs a player wearing 87 to have been filmed. Synthetic rendering
 is the only source that can cover the full legal range, so it is load-bearing
-rather than supplementary. Every number gets the same count, which also means
-the long tail is not a long tail here - the rarity of 87 in the real world is
-a fact about rosters, not about what a digit looks like.
+rather than supplementary.
 
 What it cannot provide is realism, which is what stages 1 and 3 are for. A font
 render is not a photograph of fabric stretched over a moving shoulder. Mixing
 this 1:1 with SoccerNet in stage 3 is what keeps the model from overfitting to
 clean glyph shapes.
+
+COUNTS ARE BALANCED BY LENGTH, NOT BY NUMBER
+---------------------------------------------
+An earlier version gave every one of the 101 numbers the SAME per-number count.
+That sounds neutral but is not: only 10 of the 101 legal numbers are one digit
+(0-9) against 91 that are two digits, so a flat per-number count makes the
+dataset 90% two-digit by construction. diagnose_domain_gap.py's length
+confusion matrix showed the consequence directly - the length head learned to
+guess "two digits" as a default, predicting it for ~50% of genuinely one-digit
+and unclear samples.
+
+Every number still gets full coverage (all 101 still appear at least once,
+which is the entire reason this generator exists), but the PER-NUMBER count
+now differs by length so the pooled one-digit and two-digit TOTALS land close
+to even: ``--one-digit-total`` is spread over 10 numbers, ``--two-digit-total``
+over 91, so a one-digit number gets roughly 9x the per-number images a
+two-digit number does.
+
+UNCLEAR SAMPLES: THE OTHER MISSING PIECE
+------------------------------------------
+The original generator produced ZERO unclear samples - every image had a
+legible number by construction, because rendering one was the entire point.
+But SoccerNet's real length distribution is ~29% unclear
+(diagnose_domain_gap.py, Q2), and the synthetic side of a 1:1 mix contributed
+none of that, diluting it to ~14% in what the model actually trained on. See
+``render_blank`` for how these are made: half genuinely blank (no number was
+ever there - a kit's back, a side-on player), half a rendered number that
+occlusion then buries completely (unlike ``occlude`` elsewhere in this file,
+which is capped at MAX_DIGIT_COVERAGE precisely so it never produces this
+case by accident).
 
 THE DEGRADATION ORDER IS PHYSICAL, NOT ARBITRARY
 ------------------------------------------------
@@ -274,6 +302,52 @@ def render_number(
     return canvas, mask, background
 
 
+def render_blank(font_path: Path | None, rng: random.Random) -> tuple[Image.Image, tuple[int, int, int]]:
+    """A jersey crop with no readable number: the synthetic side of "unclear".
+
+    Half the time, genuinely nothing is drawn - a kit's back, a side-on
+    player, a number that was never there. The other half, a number IS
+    drawn and then a near-full-canvas block is stamped over it - unlike
+    ``occlude`` elsewhere in this file, which is deliberately capped so it
+    can never bury more than ``MAX_DIGIT_COVERAGE`` of the digits, this is
+    the one place total occlusion is the GOAL rather than the failure mode
+    being guarded against.
+
+    Returns the image and its background colour (for ``perspective``'s
+    fill), matching ``render_number``'s return shape minus the digit mask -
+    there are no digit pixels left to protect once this returns.
+    """
+    background, foreground = _random_palette(rng)
+    canvas = _fabric(CANVAS, background, rng)
+
+    if rng.random() < 0.5:
+        return canvas, background
+
+    draw = ImageDraw.Draw(canvas)
+    number = rng.choice(LEGAL_NUMBERS)
+    target_height = int(CANVAS * rng.uniform(0.40, 0.60))
+    font = None
+    if font_path is not None:
+        probe = ImageFont.truetype(str(font_path), 100)
+        box = probe.getbbox(number)
+        rendered = max(box[3] - box[1], 1)
+        font = ImageFont.truetype(str(font_path), max(8, int(100 * target_height / rendered)))
+    if font is None:
+        font = ImageFont.load_default()
+    box = draw.textbbox((0, 0), number, font=font)
+    x = (CANVAS - (box[2] - box[0])) / 2 - box[0]
+    y = (CANVAS - (box[3] - box[1])) / 2 - box[1]
+    draw.text((x, y), number, font=font, fill=foreground)
+
+    ow = int(CANVAS * rng.uniform(0.75, 1.0))
+    oh = int(CANVAS * rng.uniform(0.75, 1.0))
+    ox = rng.randint(0, max(0, CANVAS - ow))
+    oy = rng.randint(0, max(0, CANVAS - oh))
+    colour = OCCLUDER_COLOURS[rng.randrange(len(OCCLUDER_COLOURS))]
+    draw.rectangle([ox, oy, ox + ow, oy + oh], fill=colour)
+    return canvas, background
+
+
 # --------------------------------------------------------------------------
 # Degradation
 # --------------------------------------------------------------------------
@@ -452,11 +526,58 @@ def generate_number(job: tuple[str, int, Path, list[Path], int]) -> list[dict]:
     return rows
 
 
+def generate_unclear(job: tuple[int, int, Path, list[Path], int]) -> list[dict]:
+    """Render ``count`` unclear samples, filenamed starting at ``start_index``.
+
+    ``start_index`` (rather than always starting at 0) is what lets this run
+    as several parallel chunks writing into the SAME ``images/unclear/``
+    folder without their filenames colliding - see how ``main`` splits
+    ``--unclear-total`` across workers.
+    """
+    start_index, count, out_root, fonts, seed = job
+    rng = random.Random(seed)
+    motion = RandomMotionBlur(max_kernel=9, probability=0.5)
+
+    folder = out_root / "images" / "unclear"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    for i in range(count):
+        font = rng.choice(fonts) if fonts else None
+        rendered, background = render_blank(font, rng)
+        # Same physical pipeline as degrade(), minus occlude(): there is
+        # nothing left to protect, and half of these already ARE the fully-
+        # occluded case by construction.
+        image = perspective(rendered, rng, background)
+        image = motion(image)
+        image = crush_resolution(image, rng)
+        image = gaussian(image, rng)
+        image = jpeg(image, rng)
+        index = start_index + i
+        relative = f"images/unclear/{index:05d}.jpg"
+        image.save(out_root / relative, format="JPEG", quality=92)
+        rows.append({"image": relative, "number": None, "font": font.name if font else "default"})
+    return rows
+
+
+ONE_DIGIT_NUMBERS = [n for n in LEGAL_NUMBERS if len(n) == 1]   # 10: 0-9
+TWO_DIGIT_NUMBERS = [n for n in LEGAL_NUMBERS if len(n) == 2]   # 91: 00, 10-99
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=REPO / "data" / "synthetic")
     parser.add_argument("--sheet", type=Path, default=REPO / "data" / "debug" / "synthetic_sample.png")
-    parser.add_argument("--per-number", type=int, default=500)
+    # Totals, not per-number counts - see the module docstring's "COUNTS ARE
+    # BALANCED BY LENGTH" section for why a flat per-number count is wrong.
+    # Defaults land close to SoccerNet's own ~29% unclear share (Q2) while
+    # keeping the readable half split evenly between one and two digits.
+    parser.add_argument("--one-digit-total", type=int, default=18000,
+                        help="spread over the 10 one-digit numbers")
+    parser.add_argument("--two-digit-total", type=int, default=18000,
+                        help="spread over the 91 two-digit numbers")
+    parser.add_argument("--unclear-total", type=int, default=14000,
+                        help="no legible number - see render_blank")
     parser.add_argument("--workers", type=int, default=0, help="0 = serial")
     parser.add_argument("--seed", type=int, default=1143757)
     parser.add_argument("--list-fonts", action="store_true")
@@ -473,13 +594,38 @@ def main() -> None:
         raise SystemExit(1)
 
     args.out.mkdir(parents=True, exist_ok=True)
+
+    one_digit_per_number = max(1, args.one_digit_total // len(ONE_DIGIT_NUMBERS))
+    two_digit_per_number = max(1, args.two_digit_total // len(TWO_DIGIT_NUMBERS))
+
     jobs = [
-        (number, args.per_number, args.out, fonts, args.seed + i)
-        for i, number in enumerate(LEGAL_NUMBERS)
+        (number, one_digit_per_number, args.out, fonts, args.seed + i)
+        for i, number in enumerate(ONE_DIGIT_NUMBERS)
+    ] + [
+        (number, two_digit_per_number, args.out, fonts, args.seed + 1000 + i)
+        for i, number in enumerate(TWO_DIGIT_NUMBERS)
     ]
 
-    total = len(LEGAL_NUMBERS) * args.per_number
-    print(f"\ngenerating {total} images: {len(LEGAL_NUMBERS)} numbers x {args.per_number}")
+    # Unclear generation is chunked across workers the same way the numbered
+    # jobs are, but all chunks write into ONE folder - start_index keeps their
+    # filenames from colliding. Serial (workers<=0) is just one chunk.
+    n_chunks = max(1, args.workers)
+    base = args.unclear_total // n_chunks
+    unclear_jobs = []
+    start = 0
+    for w in range(n_chunks):
+        count = base if w < n_chunks - 1 else args.unclear_total - base * (n_chunks - 1)
+        unclear_jobs.append((start, count, args.out, fonts, args.seed + 9000 + w))
+        start += count
+
+    total_readable = one_digit_per_number * len(ONE_DIGIT_NUMBERS) + two_digit_per_number * len(TWO_DIGIT_NUMBERS)
+    total = total_readable + args.unclear_total
+    print(
+        f"\ngenerating ~{total} images: "
+        f"{len(ONE_DIGIT_NUMBERS)} one-digit numbers x {one_digit_per_number}, "
+        f"{len(TWO_DIGIT_NUMBERS)} two-digit numbers x {two_digit_per_number}, "
+        f"{args.unclear_total} unclear"
+    )
 
     rows: list[dict] = []
     if args.workers > 0:
@@ -489,14 +635,26 @@ def main() -> None:
             for i, batch in enumerate(pool.imap_unordered(generate_number, jobs)):
                 rows.extend(batch)
                 print(f"  {i + 1}/{len(jobs)} numbers done ({len(rows)} images)", flush=True)
+            for i, batch in enumerate(pool.imap_unordered(generate_unclear, unclear_jobs)):
+                rows.extend(batch)
+                print(f"  unclear chunk {i + 1}/{len(unclear_jobs)} done ({len(rows)} images)", flush=True)
     else:
         for i, job in enumerate(jobs):
             rows.extend(generate_number(job))
             print(f"  {i + 1}/{len(jobs)} numbers done ({len(rows)} images)", flush=True)
+        for i, job in enumerate(unclear_jobs):
+            rows.extend(generate_unclear(job))
+            print(f"  unclear chunk {i + 1}/{len(unclear_jobs)} done ({len(rows)} images)", flush=True)
+
+    n_unclear = sum(1 for r in rows if r["number"] is None)
+    n_one = sum(1 for r in rows if r["number"] is not None and len(r["number"]) == 1)
+    n_two = sum(1 for r in rows if r["number"] is not None and len(r["number"]) == 2)
 
     manifest = {
-        "version": "synthetic-v1",
-        "per_number": args.per_number,
+        "version": "synthetic-v2-length-balanced",
+        "one_digit_per_number": one_digit_per_number,
+        "two_digit_per_number": two_digit_per_number,
+        "unclear_total": args.unclear_total,
         "numbers": LEGAL_NUMBERS,
         "input_size": INPUT_SIZE,
         "seed": args.seed,
@@ -504,19 +662,32 @@ def main() -> None:
         "degradation": (
             "occlusion<=30% (digit coverage capped at "
             f"{MAX_DIGIT_COVERAGE:.0%}) -> perspective -> motion blur -> "
-            "downscale 20-40px -> gaussian -> jpeg"
+            "downscale 20-40px -> gaussian -> jpeg. Unclear samples skip "
+            "occlusion's cap (see render_blank) since total occlusion is the goal."
         ),
+        "length_distribution": {"unclear": n_unclear, "one_digit": n_one, "two_digit": n_two},
         "rows": rows,
     }
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
     print(f"\nwrote {args.out / 'manifest.json'} ({len(rows)} rows)")
+    print(f"  length distribution: unclear={n_unclear} one_digit={n_one} two_digit={n_two}")
 
     # Sample from the finished manifest, not from generation, so the sheet
-    # shows what the loader will actually read off disk.
+    # shows what the loader will actually read off disk. A handful of
+    # unclear rows are forced in rather than left to chance, since they used
+    # to not exist at all and are exactly what needs a human's eyes on them.
     from jersey_data import save_contact_sheet
 
-    picks = random.Random(0).sample(rows, min(20, len(rows)))
-    samples = [(Image.open(args.out / r["image"]).convert("RGB"), f"#{r['number']}") for r in picks]
+    rng = random.Random(0)
+    unclear_rows = [r for r in rows if r["number"] is None]
+    readable_rows = [r for r in rows if r["number"] is not None]
+    picks = rng.sample(unclear_rows, min(6, len(unclear_rows))) + \
+        rng.sample(readable_rows, min(14, len(readable_rows)))
+    rng.shuffle(picks)
+    samples = [
+        (Image.open(args.out / r["image"]).convert("RGB"), "unclear" if r["number"] is None else f"#{r['number']}")
+        for r in picks
+    ]
     sheet = save_contact_sheet(samples, args.sheet)
 
     print(f"wrote {sheet}")
