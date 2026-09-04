@@ -25,6 +25,7 @@ from jersey import (
     LocalClassifierConfig,
     OCRGateConfig,
     PARSeqConfig,
+    PerDigitClassifierConfig,
     RoboflowConfig,
 )
 from render import CourtRenderConfig
@@ -121,6 +122,7 @@ class JerseyPipelineConfig:
     roboflow: RoboflowConfig = field(default_factory=RoboflowConfig)
     local: LocalClassifierConfig = field(default_factory=LocalClassifierConfig)
     parseq: PARSeqConfig = field(default_factory=PARSeqConfig)
+    perdigit: PerDigitClassifierConfig = field(default_factory=PerDigitClassifierConfig)
 
 
 @dataclass

@@ -292,7 +292,32 @@ jersey:
     # 未恢复值，非源码调优值，需在真实视频上标定
     min_confidence: 0.50
 
-  # --- Locally-trained classifier (backend: local) -- BEST, NEEDS TRAINING --
+  # --- Per-digit model (backend: perdigit) -- CURRENT BEST, OPEN NUMBER SET --
+  #
+  # length + digit1 + digit2 heads, trained SVHN -> synthetic (all 101 legal
+  # FIBA 3x3 numbers) -> SoccerNet, by jersey-train-standalone
+  # (finetune_soccernet.py). Unlike `local` below, this is NOT a closed-set
+  # classifier: it can emit any legal number including ones that never
+  # appeared in training, because it reads digits rather than looking up a
+  # fixed class list.
+  #
+  # The .pt is a plain state_dict; input size and normalization come from the
+  # SAME-NAME .json sidecar next to it, which MUST be present too.
+  perdigit:
+    # From jersey-train-standalone's checkpoints/stage3_soccernet.pt (+ .json).
+    # null = backend unavailable, `backend: auto` falls through to `local`.
+    weights: ../checkpoints/stage3_soccernet.pt
+    device: cuda
+    # Gates on the WEAKEST head actually used for the prediction (just digit1
+    # for a one-digit number, all three for two digits).
+    # 未恢复值，非源码调优值，需在真实视频上标定
+    min_confidence: 0.50
+    min_margin: 0.15
+
+  # --- Locally-trained classifier (backend: local) -- OLD, 41-CLASS CLOSED SET --
+  #
+  # DEPRECATED alongside train/train_jersey.py - see that file's header. Kept
+  # only as a fallback for `backend: auto` when no perdigit checkpoint exists.
   #
   # Closed-set 0-99 classification, trained on the CC BY 4.0 Roboflow dataset:
   #   python scripts/download_jersey_ocr_dataset.py --out data/jersey_ocr

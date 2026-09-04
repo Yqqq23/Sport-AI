@@ -173,6 +173,7 @@ def run_pipeline(
         roboflow=config.jersey.roboflow,
         local=config.jersey.local,
         parseq=config.jersey.parseq,
+        perdigit=config.jersey.perdigit,
     )
     shot_analyzer = ShotAnalyzer(config.shot, fps=fps)
     recorder = ShotRecorder()

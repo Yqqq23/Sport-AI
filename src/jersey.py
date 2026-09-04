@@ -765,6 +765,184 @@ class LocalJerseyClassifier:
         return clean_jersey_number(label), confidence
 
 
+@dataclass
+class PerDigitClassifierConfig:
+    """Settings for the per-digit jersey model trained by jersey-train-standalone.
+
+    Distinct from ``LocalClassifierConfig``: that one loads a 41-CLASS CLOSED-SET
+    checkpoint from the now-deprecated ``train/train_jersey.py``. This one loads
+    the three-head (length/digit1/digit2) architecture from ``train/jersey_net.py``,
+    which can emit ANY of the 101 legal FIBA 3x3 numbers (0, 00, 1-99) including
+    ones that never appeared in training - the entire reason it was built.
+    """
+
+    #: Path to the .pt from finetune_soccernet.py (stage3_soccernet.pt). The
+    #: matching .json sidecar (same stem) must sit next to it - that is where
+    #: input size and normalization are read from, not hardcoded here.
+    weights: Optional[Path] = None
+    device: str = "cuda"
+    #: Gates on the WEAKEST of the heads actually used for this prediction (just
+    #: digit1 for a one-digit number, all three for a two-digit one) - a
+    #: confident length paired with an unsure digit is still an unsure reading.
+    min_confidence: float = 0.50
+    min_margin: float = 0.15
+
+
+class PerDigitJerseyClassifier:
+    """Loads a jersey-train-standalone checkpoint: length + digit1 + digit2 heads.
+
+    THE 0/00 GUARD IS THE WHOLE POINT OF THIS CLASS EXISTING SEPARATELY FROM
+    ``LocalJerseyClassifier``. ``clean_jersey_number`` - used by every other
+    backend in this file - rejects "00" outright and strips leading zeros, both
+    of which are exactly wrong for this model: "0" and "00" are two DIFFERENT
+    legal FIBA 3x3 numbers and must never collapse into one. This class builds
+    its label directly from the decoded digits and never routes it through
+    ``clean_jersey_number``.
+    """
+
+    def __init__(self, config: Optional[PerDigitClassifierConfig] = None) -> None:
+        self.config = config or PerDigitClassifierConfig()
+        self._model: Any = None
+        self._device: Any = None
+        self._input_size = 96
+        self._mean: Any = None
+        self._std: Any = None
+        self._available: Optional[bool] = None
+        self.calls = 0
+        self.rejected_low_confidence = 0
+        self.rejected_unclear = 0
+
+    def is_available(self) -> bool:
+        if self._available is None:
+            self._available = self._load()
+        return bool(self._available)
+
+    def _load(self) -> bool:
+        import json as _json
+        from pathlib import Path as _Path
+
+        weights = self.config.weights
+        if weights is None:
+            LOGGER.error(
+                "Jersey backend 'perdigit' needs jersey.perdigit.weights pointing "
+                "at a checkpoint from finetune_soccernet.py."
+            )
+            return False
+        weights = _Path(weights)
+        sidecar = weights.with_suffix(".json")
+        if not weights.exists() or not sidecar.exists():
+            LOGGER.error(
+                "Per-digit jersey checkpoint incomplete at %s - need BOTH the "
+                ".pt and its .json sidecar (input size / normalization live in "
+                "the sidecar, not in this code).",
+                weights,
+            )
+            return False
+
+        try:
+            import sys as _sys
+
+            import torch
+
+            train_dir = str(_Path(__file__).resolve().parent.parent / "train")
+            if train_dir not in _sys.path:
+                _sys.path.insert(0, train_dir)
+            from jersey_net import JerseyNet  # basketball-v2's own copy, not imported across the account split
+
+            meta = _json.loads(sidecar.read_text(encoding="utf-8"))
+            self._input_size = int(meta.get("input_size", 96))
+            normalize = meta.get("normalize", {})
+            mean = normalize.get("mean", (0.485, 0.456, 0.406))
+            std = normalize.get("std", (0.229, 0.224, 0.225))
+
+            device = torch.device(
+                self.config.device
+                if (self.config.device != "cuda" or torch.cuda.is_available())
+                else "cpu"
+            )
+            if self.config.device == "cuda" and device.type == "cpu":
+                LOGGER.warning("CUDA requested for the per-digit jersey model but unavailable; using CPU.")
+
+            model = JerseyNet(pretrained=False)
+            state = torch.load(str(weights), map_location="cpu", weights_only=True)
+            model.load_state_dict(state)
+            model.eval()
+
+            self._model = model.to(device)
+            self._device = device
+            self._mean = torch.tensor(mean, device=device).view(1, 3, 1, 1)
+            self._std = torch.tensor(std, device=device).view(1, 3, 1, 1)
+        except Exception as exc:
+            LOGGER.error("Could not load the per-digit jersey model from %s: %s", weights, exc)
+            return False
+
+        LOGGER.info(
+            "Per-digit jersey classifier ready: %s on %s (stage=%s, selection_metric=%s)",
+            weights.name,
+            self._device,
+            meta.get("stage"),
+            (meta.get("metrics") or {}).get("selection_metric_mean_per_digit_macro_f1"),
+        )
+        return True
+
+    def recognize(self, crop: "np.ndarray") -> tuple[Optional[str], float]:
+        if crop is None or getattr(crop, "size", 0) == 0 or not self.is_available():
+            return None, 0.0
+        import cv2
+        import torch
+
+        try:
+            resized = cv2.resize(
+                crop, (self._input_size, self._input_size), interpolation=cv2.INTER_CUBIC
+            )
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            tensor = torch.from_numpy(rgb).to(self._device)
+            tensor = tensor.permute(2, 0, 1).unsqueeze(0).float().div_(255.0)
+            tensor = (tensor - self._mean) / self._std
+
+            with torch.no_grad():
+                logit_len, logit_d1, logit_d2 = self._model(tensor)
+                p_len = torch.softmax(logit_len, dim=1)[0]
+                p_d1 = torch.softmax(logit_d1, dim=1)[0]
+                p_d2 = torch.softmax(logit_d2, dim=1)[0]
+            self.calls += 1
+
+            def top1_and_margin(probs: "torch.Tensor") -> tuple[int, float, float]:
+                top = torch.topk(probs, k=min(2, probs.numel()))
+                idx = int(top.indices[0])
+                conf = float(top.values[0])
+                margin = conf - (float(top.values[1]) if top.values.numel() > 1 else 0.0)
+                return idx, conf, margin
+
+            length, conf_len, margin_len = top1_and_margin(p_len)
+
+            if length == 0:
+                # Model says the number is not legible in this crop. This is a
+                # feature, not a missing reading: a confident "unclear" costs
+                # the vote nothing, where a forced guess would poison it.
+                self.rejected_unclear += 1
+                return None, 0.0
+
+            d1, conf_d1, margin_d1 = top1_and_margin(p_d1)
+            if length == 1:
+                label = str(d1)
+                confidence = min(conf_len, conf_d1)
+                margin = min(margin_len, margin_d1)
+            else:
+                d2, conf_d2, margin_d2 = top1_and_margin(p_d2)
+                label = f"{d1}{d2}"  # "00" stays "00" - never routed through clean_jersey_number
+                confidence = min(conf_len, conf_d1, conf_d2)
+                margin = min(margin_len, margin_d1, margin_d2)
+        except Exception as exc:
+            LOGGER.warning("Per-digit jersey classification failed: %s", exc)
+            return None, 0.0
+
+        if confidence < self.config.min_confidence or margin < self.config.min_margin:
+            self.rejected_low_confidence += 1
+            return None, 0.0
+        return label, confidence
+
+
 class RoboflowJerseyOCR:
     """A Roboflow-hosted model, via ``inference_sdk.InferenceHTTPClient``.
 
@@ -957,6 +1135,7 @@ def _best_digit_candidate(
 #: Backend name -> zero-argument factory. ``auto`` is resolved by
 #: ``make_ocr_backend`` in preference order rather than being listed here.
 OCR_BACKENDS: dict[str, Any] = {
+    "perdigit": PerDigitJerseyClassifier,
     "parseq": PARSeqJerseyOCR,
     "local": LocalJerseyClassifier,
     "roboflow": RoboflowJerseyOCR,
@@ -967,15 +1146,16 @@ OCR_BACKENDS: dict[str, Any] = {
 
 #: Tried in this order for ``backend: auto``.
 #:
-#: ``local`` first: a classifier trained on jersey numbers beats a general
-#: recognizer and costs ~1-2 ms. It is skipped automatically when no checkpoint
-#: has been trained yet, which is why ``parseq`` sits immediately behind it -
-#: PARSeq needs no training at all and is the strongest zero-setup option.
+#: ``perdigit`` first: trained on SVHN + synthetic + SoccerNet specifically for
+#: small, motion-blurred, wide-angle numbers, and the only backend that can
+#: emit a number outside whatever set happened to be trained on. Falls through
+#: to ``local`` (the older 41-class closed-set model) when no perdigit
+#: checkpoint exists yet, then ``parseq`` (needs no training at all).
 #:
 #: Tesseract is last on purpose: it is the only entry not designed for small,
 #: low-contrast, motion-blurred text, and picking it when a better option is
 #: available would quietly cap the whole feature's accuracy.
-_AUTO_ORDER = ("local", "parseq", "paddleocr", "easyocr", "pytesseract")
+_AUTO_ORDER = ("perdigit", "local", "parseq", "paddleocr", "easyocr", "pytesseract")
 
 
 def make_ocr_backend(
@@ -984,6 +1164,7 @@ def make_ocr_backend(
     roboflow: Optional["RoboflowConfig"] = None,
     local: Optional["LocalClassifierConfig"] = None,
     parseq: Optional["PARSeqConfig"] = None,
+    perdigit: Optional["PerDigitClassifierConfig"] = None,
 ) -> Any:
     """Build an OCR backend by name, or auto-select the best installed one.
 
@@ -1004,6 +1185,15 @@ def make_ocr_backend(
 
     if key == "auto":
         for candidate in _AUTO_ORDER:
+            if candidate == "perdigit" and (
+                perdigit is None or perdigit.weights is None or not Path(perdigit.weights).exists()
+            ):
+                LOGGER.info(
+                    "Per-digit jersey checkpoint is unavailable (%s); "
+                    "auto-selection will try the older local classifier next.",
+                    getattr(perdigit, "weights", None),
+                )
+                continue
             if candidate == "local" and (
                 local is None or local.weights is None or not Path(local.weights).exists()
             ):
@@ -1013,7 +1203,7 @@ def make_ocr_backend(
                     getattr(local, "weights", None),
                 )
                 continue
-            backend = _construct(candidate, use_gpu, roboflow, local, parseq)
+            backend = _construct(candidate, use_gpu, roboflow, local, parseq, perdigit)
             if backend.is_available():
                 LOGGER.info("Jersey OCR backend auto-selected: %s", candidate)
                 if candidate == "pytesseract":
@@ -1030,14 +1220,14 @@ def make_ocr_backend(
             "  python train/train_jersey.py --data data/jersey_ocr",
             ", ".join(_AUTO_ORDER),
         )
-        return _construct("pytesseract", use_gpu, roboflow, local, parseq)
+        return _construct("pytesseract", use_gpu, roboflow, local, parseq, perdigit)
 
     if key not in OCR_BACKENDS:
         raise ValueError(
             f"Unknown jersey OCR backend {name!r}. "
             f"Valid: {sorted(OCR_BACKENDS)} or 'auto'."
         )
-    return _construct(key, use_gpu, roboflow, local, parseq)
+    return _construct(key, use_gpu, roboflow, local, parseq, perdigit)
 
 
 def _construct(
@@ -1046,7 +1236,10 @@ def _construct(
     roboflow: Optional["RoboflowConfig"] = None,
     local: Optional["LocalClassifierConfig"] = None,
     parseq: Optional["PARSeqConfig"] = None,
+    perdigit: Optional["PerDigitClassifierConfig"] = None,
 ) -> Any:
+    if key == "perdigit":
+        return PerDigitJerseyClassifier(perdigit or PerDigitClassifierConfig())
     if key == "parseq":
         config = parseq or PARSeqConfig()
         if not use_gpu:
