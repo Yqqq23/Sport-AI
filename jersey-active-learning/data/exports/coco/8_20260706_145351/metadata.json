@@ -1,0 +1,14 @@
+{
+  "export_id": "8_20260706_145351",
+  "video_id": 8,
+  "export_time": "2026-07-06T14:53:51.652408+00:00",
+  "dataset_format": "coco_detection_v1",
+  "source": "jersey-active-learning",
+  "category_count": 1,
+  "image_count": 3,
+  "annotation_count": 5,
+  "skipped_unclear_count": 0,
+  "skipped_invalid_bbox_count": 0,
+  "skipped_missing_image_count": 0,
+  "skipped_annotations": []
+}

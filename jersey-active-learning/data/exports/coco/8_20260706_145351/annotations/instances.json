@@ -1,0 +1,138 @@
+{
+  "info": {
+    "description": "Jersey Active Learning COCO Detection Dataset",
+    "version": "coco_detection_v1",
+    "year": 2026,
+    "date_created": "2026-07-06T14:53:51.651440+00:00"
+  },
+  "licenses": [],
+  "images": [
+    {
+      "id": 1,
+      "file_name": "video_8_frame_000000.jpg",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": 2,
+      "file_name": "video_8_frame_000030.jpg",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "id": 3,
+      "file_name": "video_8_frame_000060.jpg",
+      "width": 1920,
+      "height": 1080
+    }
+  ],
+  "annotations": [
+    {
+      "id": 1,
+      "image_id": 1,
+      "category_id": 1,
+      "bbox": [
+        257,
+        478,
+        97,
+        81
+      ],
+      "area": 7857,
+      "iscrowd": 0,
+      "source_annotation_id": 1,
+      "prediction_id": 616,
+      "video_id": 8,
+      "frame_id": 0,
+      "track_id": 1,
+      "jersey_number": "24",
+      "label_status": "wrong_number"
+    },
+    {
+      "id": 2,
+      "image_id": 1,
+      "category_id": 1,
+      "bbox": [
+        737,
+        458,
+        522,
+        571
+      ],
+      "area": 298062,
+      "iscrowd": 0,
+      "source_annotation_id": 2,
+      "prediction_id": 618,
+      "video_id": 8,
+      "frame_id": 0,
+      "track_id": 3,
+      "jersey_number": "10",
+      "label_status": "wrong_bbox"
+    },
+    {
+      "id": 3,
+      "image_id": 1,
+      "category_id": 1,
+      "bbox": [
+        1217,
+        498,
+        97,
+        81
+      ],
+      "area": 7857,
+      "iscrowd": 0,
+      "source_annotation_id": 4,
+      "prediction_id": 620,
+      "video_id": 8,
+      "frame_id": 0,
+      "track_id": 5,
+      "jersey_number": "27",
+      "label_status": "wrong_number"
+    },
+    {
+      "id": 4,
+      "image_id": 2,
+      "category_id": 1,
+      "bbox": [
+        257,
+        478,
+        97,
+        81
+      ],
+      "area": 7857,
+      "iscrowd": 0,
+      "source_annotation_id": 3,
+      "prediction_id": 621,
+      "video_id": 8,
+      "frame_id": 30,
+      "track_id": 1,
+      "jersey_number": "25",
+      "label_status": "wrong_number"
+    },
+    {
+      "id": 5,
+      "image_id": 3,
+      "category_id": 1,
+      "bbox": [
+        257,
+        478,
+        97,
+        81
+      ],
+      "area": 7857,
+      "iscrowd": 0,
+      "source_annotation_id": 5,
+      "prediction_id": 627,
+      "video_id": 8,
+      "frame_id": 60,
+      "track_id": 1,
+      "jersey_number": "27",
+      "label_status": "wrong_number"
+    }
+  ],
+  "categories": [
+    {
+      "id": 1,
+      "name": "jersey",
+      "supercategory": "sports_uniform"
+    }
+  ]
+}

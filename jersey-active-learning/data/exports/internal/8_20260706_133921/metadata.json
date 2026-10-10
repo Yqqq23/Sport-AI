@@ -1,0 +1,9 @@
+{
+  "video_id": 8,
+  "export_time": "2026-07-06T13:39:21.196224+00:00",
+  "annotation_count": 5,
+  "image_count": 5,
+  "crop_count": 5,
+  "source": "jersey-active-learning",
+  "dataset_format": "internal_v1"
+}

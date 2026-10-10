@@ -1,0 +1,21 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+sqlalchemy==2.0.43
+pydantic==2.11.7
+pydantic-settings==2.10.1
+python-multipart==0.0.20
+python-dotenv==1.0.1
+
+numpy==2.1.1
+opencv-python==4.10.0.84
+pillow==11.3.0
+ultralytics==8.3.39
+
+# Jersey number OCR
+pytesseract>=0.3.10
+
+# Face clustering for track assignment
+insightface>=0.7.3
+onnxruntime>=1.17.0
+
+pytest==8.4.2

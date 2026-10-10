@@ -1,0 +1,147 @@
+[
+  {
+    "annotation_id": 1,
+    "prediction_id": 616,
+    "video_id": 8,
+    "frame_id": 0,
+    "track_id": 1,
+    "image_filename": "annotation_1_frame_000000.jpg",
+    "crop_filename": "annotation_1_crop.jpg",
+    "image_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\images\\annotation_1_frame_000000.jpg",
+    "crop_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\crops\\annotation_1_crop.jpg",
+    "original_bbox": [
+      257,
+      478,
+      354,
+      559
+    ],
+    "corrected_bbox": [
+      257,
+      478,
+      354,
+      559
+    ],
+    "original_number": "23",
+    "corrected_number": "24",
+    "label_status": "wrong_number",
+    "image_width": 1920,
+    "image_height": 1080,
+    "created_at": "2026-07-06T11:10:10"
+  },
+  {
+    "annotation_id": 2,
+    "prediction_id": 618,
+    "video_id": 8,
+    "frame_id": 0,
+    "track_id": 3,
+    "image_filename": "annotation_2_frame_000000.jpg",
+    "crop_filename": "annotation_2_crop.jpg",
+    "image_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\images\\annotation_2_frame_000000.jpg",
+    "crop_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\crops\\annotation_2_crop.jpg",
+    "original_bbox": [
+      737,
+      458,
+      834,
+      539
+    ],
+    "corrected_bbox": [
+      737,
+      458,
+      1259,
+      1029
+    ],
+    "original_number": "7",
+    "corrected_number": "10",
+    "label_status": "wrong_bbox",
+    "image_width": 1920,
+    "image_height": 1080,
+    "created_at": "2026-07-06T11:10:19"
+  },
+  {
+    "annotation_id": 4,
+    "prediction_id": 620,
+    "video_id": 8,
+    "frame_id": 0,
+    "track_id": 5,
+    "image_filename": "annotation_4_frame_000000.jpg",
+    "crop_filename": "annotation_4_crop.jpg",
+    "image_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\images\\annotation_4_frame_000000.jpg",
+    "crop_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\crops\\annotation_4_crop.jpg",
+    "original_bbox": [
+      1217,
+      498,
+      1314,
+      579
+    ],
+    "corrected_bbox": [
+      1217,
+      498,
+      1314,
+      579
+    ],
+    "original_number": "28",
+    "corrected_number": "27",
+    "label_status": "wrong_number",
+    "image_width": 1920,
+    "image_height": 1080,
+    "created_at": "2026-07-06T13:19:31"
+  },
+  {
+    "annotation_id": 3,
+    "prediction_id": 621,
+    "video_id": 8,
+    "frame_id": 30,
+    "track_id": 1,
+    "image_filename": "annotation_3_frame_000030.jpg",
+    "crop_filename": "annotation_3_crop.jpg",
+    "image_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\images\\annotation_3_frame_000030.jpg",
+    "crop_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\crops\\annotation_3_crop.jpg",
+    "original_bbox": [
+      257,
+      478,
+      354,
+      559
+    ],
+    "corrected_bbox": [
+      257,
+      478,
+      354,
+      559
+    ],
+    "original_number": "23",
+    "corrected_number": "25",
+    "label_status": "wrong_number",
+    "image_width": 1920,
+    "image_height": 1080,
+    "created_at": "2026-07-06T13:12:57"
+  },
+  {
+    "annotation_id": 5,
+    "prediction_id": 627,
+    "video_id": 8,
+    "frame_id": 60,
+    "track_id": 1,
+    "image_filename": "annotation_5_frame_000060.jpg",
+    "crop_filename": "annotation_5_crop.jpg",
+    "image_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\images\\annotation_5_frame_000060.jpg",
+    "crop_path": "D:\\25-26香港教育大学\\继续卷output。。。\\2526shitu\\jersey-active-learning\\data\\exports\\internal\\8_20260706_133921\\crops\\annotation_5_crop.jpg",
+    "original_bbox": [
+      257,
+      478,
+      354,
+      559
+    ],
+    "corrected_bbox": [
+      257,
+      478,
+      354,
+      559
+    ],
+    "original_number": "28",
+    "corrected_number": "27",
+    "label_status": "wrong_number",
+    "image_width": 1920,
+    "image_height": 1080,
+    "created_at": "2026-07-06T13:39:18"
+  }
+]
