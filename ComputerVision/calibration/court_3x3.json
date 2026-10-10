@@ -1,0 +1,396 @@
+{
+  "created_utc": "2026-08-16T17:34:29+00:00",
+  "court": {
+    "standard": "FIBA 3x3",
+    "width_mm": 15000,
+    "length_mm": 14000,
+    "units": "metres"
+  },
+  "source_image": "court_plate.png",
+  "source_resolution": [
+    1920,
+    1080
+  ],
+  "pixel_frame": "video",
+  "annotation_image_resolution": [
+    1920,
+    1080
+  ],
+  "annotation_pixel_frame": "video",
+  "still_to_video": {
+    "matrix_2x3": [
+      [
+        0.6653233688508323,
+        -0.000916426199674606,
+        2.757
+      ],
+      [
+        0.000916426199674606,
+        0.6653233688508323,
+        555.159
+      ]
+    ],
+    "note": "real.png(2880x752) -> video(1920x1080): similarity scale=0.665324 rot=0.07892deg t=(2.757, 555.159); measured residual median=0.573px max=1.778px"
+  },
+  "ransac": {
+    "method": "cv2.RANSAC",
+    "reproj_threshold_px": 5.0,
+    "fit_direction": "court_m -> image_px (阈值单位才是像素)",
+    "num_inliers": 5,
+    "num_points": 8,
+    "reproj_px_median": 0.74,
+    "reproj_px_max": 59.896
+  },
+  "horizon_crosses_court": false,
+  "homography": [
+    [
+      -0.006024178215611192,
+      -0.015290427070004255,
+      12.915724924135022
+    ],
+    [
+      5.1037409108366026e-05,
+      0.014861539692294796,
+      -15.706884067045799
+    ],
+    [
+      -9.021115544487218e-05,
+      -0.001995888108896336,
+      1.0
+    ]
+  ],
+  "homography_inverse": [
+    [
+      185.78007421313652,
+      118.17611062768145,
+      -543.3058657988901
+    ],
+    [
+      -15.39072410070802,
+      54.75082140507473,
+      1058.7471632530385
+    ],
+    [
+      -0.013958728066506247,
+      0.11993731688039981,
+      1.0
+    ]
+  ],
+  "point_ids_used": [
+    1,
+    2,
+    4,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "inlier_mask": [
+    1,
+    1,
+    0,
+    1,
+    0,
+    1,
+    0,
+    1
+  ],
+  "outlier_point_ids": [
+    4,
+    8,
+    10
+  ],
+  "dropped_points": [
+    {
+      "id": 3,
+      "name": "three_base_left",
+      "reason": "画面上未标注"
+    },
+    {
+      "id": 5,
+      "name": "three_break_left",
+      "reason": "画面上未标注"
+    },
+    {
+      "id": 6,
+      "name": "three_break_right",
+      "reason": "画面上未标注"
+    },
+    {
+      "id": 12,
+      "name": "halfway_left",
+      "reason": "画面上未标注"
+    },
+    {
+      "id": 13,
+      "name": "halfway_right",
+      "reason": "画面上未标注"
+    }
+  ],
+  "points": [
+    {
+      "id": 1,
+      "name": "paint_base_left",
+      "image_px_annotation": [
+        422.53,
+        1054.27
+      ],
+      "image_px_video": [
+        422.53,
+        1054.27
+      ],
+      "court_m": [
+        5.050000190734863,
+        0.0
+      ],
+      "used": true
+    },
+    {
+      "id": 2,
+      "name": "paint_base_right",
+      "image_px_annotation": [
+        1520.67,
+        1050.4
+      ],
+      "image_px_video": [
+        1520.67,
+        1050.4
+      ],
+      "court_m": [
+        9.949999809265137,
+        0.0
+      ],
+      "used": true
+    },
+    {
+      "id": 3,
+      "name": "three_base_left",
+      "image_px_annotation": null,
+      "image_px_video": null,
+      "court_m": [
+        0.8999999761581421,
+        0.0
+      ],
+      "used": false
+    },
+    {
+      "id": 4,
+      "name": "three_base_right",
+      "image_px_annotation": [
+        2560.8,
+        1062.0
+      ],
+      "image_px_video": [
+        2560.8,
+        1062.0
+      ],
+      "court_m": [
+        14.100000381469727,
+        0.0
+      ],
+      "used": true
+    },
+    {
+      "id": 5,
+      "name": "three_break_left",
+      "image_px_annotation": null,
+      "image_px_video": null,
+      "court_m": [
+        0.8999999761581421,
+        2.990000009536743
+      ],
+      "used": false
+    },
+    {
+      "id": 6,
+      "name": "three_break_right",
+      "image_px_annotation": null,
+      "image_px_video": null,
+      "court_m": [
+        14.100000381469727,
+        2.990000009536743
+      ],
+      "used": false
+    },
+    {
+      "id": 7,
+      "name": "paint_ft_left",
+      "image_px_annotation": [
+        666.13,
+        799.07
+      ],
+      "image_px_video": [
+        666.13,
+        799.07
+      ],
+      "court_m": [
+        5.050000190734863,
+        5.800000190734863
+      ],
+      "used": true
+    },
+    {
+      "id": 8,
+      "name": "paint_ft_right",
+      "image_px_annotation": [
+        1265.47,
+        802.93
+      ],
+      "image_px_video": [
+        1265.47,
+        802.93
+      ],
+      "court_m": [
+        9.949999809265137,
+        5.800000190734863
+      ],
+      "used": true
+    },
+    {
+      "id": 9,
+      "name": "ft_circle_far",
+      "image_px_annotation": [
+        967.73,
+        752.67
+      ],
+      "image_px_video": [
+        967.73,
+        752.67
+      ],
+      "court_m": [
+        7.5,
+        7.599999904632568
+      ],
+      "used": true
+    },
+    {
+      "id": 10,
+      "name": "three_arc_top",
+      "image_px_annotation": [
+        971.6,
+        733.33
+      ],
+      "image_px_video": [
+        971.6,
+        733.33
+      ],
+      "court_m": [
+        7.5,
+        8.324999809265137
+      ],
+      "used": true
+    },
+    {
+      "id": 11,
+      "name": "centre_circle_near",
+      "image_px_annotation": [
+        971.6,
+        683.07
+      ],
+      "image_px_video": [
+        971.6,
+        683.07
+      ],
+      "court_m": [
+        7.5,
+        12.199999809265137
+      ],
+      "used": true
+    },
+    {
+      "id": 12,
+      "name": "halfway_left",
+      "image_px_annotation": null,
+      "image_px_video": null,
+      "court_m": [
+        0.0,
+        14.0
+      ],
+      "used": false
+    },
+    {
+      "id": 13,
+      "name": "halfway_right",
+      "image_px_annotation": null,
+      "image_px_video": null,
+      "court_m": [
+        15.0,
+        14.0
+      ],
+      "used": false
+    }
+  ],
+  "refined": {
+    "method": "ICP against every painted court line (nearest-line distance)",
+    "image": "court_plate.png",
+    "line_pixels_used": 11219,
+    "median_dev_m": 0.0635,
+    "p90_dev_m": 0.2224,
+    "anchor_ids": [
+      1,
+      2,
+      7,
+      9,
+      11
+    ],
+    "anchor_residual_m": [
+      0.0223,
+      0.0295,
+      0.0121,
+      0.0152,
+      0.0087
+    ],
+    "history": [
+      {
+        "iter": 0,
+        "pixels": 15254,
+        "median_m": 0.15,
+        "p90_m": 1.0639
+      },
+      {
+        "iter": 1,
+        "pixels": 11451,
+        "median_m": 0.0655,
+        "p90_m": 0.2404
+      },
+      {
+        "iter": 2,
+        "pixels": 11219,
+        "median_m": 0.0635,
+        "p90_m": 0.2224
+      },
+      {
+        "iter": 3,
+        "pixels": 11219,
+        "median_m": 0.0635,
+        "p90_m": 0.2224
+      },
+      {
+        "iter": 4,
+        "pixels": 11219,
+        "median_m": 0.0635,
+        "p90_m": 0.2224
+      },
+      {
+        "iter": 5,
+        "pixels": 11219,
+        "median_m": 0.0635,
+        "p90_m": 0.2224
+      },
+      {
+        "iter": 6,
+        "pixels": 11219,
+        "median_m": 0.0635,
+        "p90_m": 0.2224
+      },
+      {
+        "iter": 7,
+        "pixels": 11219,
+        "median_m": 0.0635,
+        "p90_m": 0.2224
+      }
+    ],
+    "refined_utc": "2026-08-16T17:34:31+00:00"
+  }
+}

@@ -1,0 +1,19 @@
+# jersey_train 的依赖。
+#
+# torch / torchvision 的版本要和你服务器的 CUDA 对上，这里不钉死 ——
+# 按 https://pytorch.org/get-started/locally/ 给的命令装。
+#
+# 注意：mine 子命令还需要 basketball-v2 的检测栈（ultralytics 等），
+# 因为它要跑检测器才能挖出球衣 crop。download / train / verify / predict
+# 都不需要 basketball-v2。
+
+# ⚠ numpy 必须 1.x —— 详见 trajectory/requirements.txt 里的说明。
+# numpy 2.x 会让用 1.x 编译的二进制包全部报 _ARRAY_API not found。
+numpy>=1.24,<2
+
+torch>=2.0
+torchvision>=0.15
+opencv-python>=4.8
+
+# download 子命令用（拉 Roboflow 导出）
+requests>=2.28

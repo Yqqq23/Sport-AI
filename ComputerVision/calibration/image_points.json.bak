@@ -1,0 +1,117 @@
+{
+  "source_image": "court_plate.png",
+  "source_resolution": [
+    1920,
+    1080
+  ],
+  "pixel_frame": "video",
+  "num_points": 13,
+  "created_utc": "2026-08-16T17:21:04+00:00",
+  "note": "coordinates are original-image pixels; points constructed by extending lines may fall outside [0,W)x[0,H) and that is valid",
+  "points": [
+    {
+      "id": 1,
+      "name": "paint_base_left",
+      "x": 422.53,
+      "y": 1054.27,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 2,
+      "name": "paint_base_right",
+      "x": 1520.67,
+      "y": 1050.4,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 3,
+      "name": "three_base_left",
+      "x": -602.13,
+      "y": 1065.87,
+      "labeled": true,
+      "outside_frame": true
+    },
+    {
+      "id": 4,
+      "name": "three_base_right",
+      "x": 2560.8,
+      "y": 1062.0,
+      "labeled": true,
+      "outside_frame": true
+    },
+    {
+      "id": 5,
+      "name": "three_break_left",
+      "x": 244.67,
+      "y": 822.27,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 6,
+      "name": "three_break_right",
+      "x": 1683.07,
+      "y": 814.53,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 7,
+      "name": "paint_ft_left",
+      "x": 666.13,
+      "y": 799.07,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 8,
+      "name": "paint_ft_right",
+      "x": 1265.47,
+      "y": 802.93,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 9,
+      "name": "ft_circle_far",
+      "x": 967.73,
+      "y": 752.67,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 10,
+      "name": "three_arc_top",
+      "x": 971.6,
+      "y": 733.33,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 11,
+      "name": "centre_circle_near",
+      "x": 971.6,
+      "y": 683.07,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 12,
+      "name": "halfway_left",
+      "x": 608.13,
+      "y": 601.87,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 13,
+      "name": "halfway_right",
+      "x": 1226.8,
+      "y": 594.13,
+      "labeled": true,
+      "outside_frame": false
+    }
+  ]
+}

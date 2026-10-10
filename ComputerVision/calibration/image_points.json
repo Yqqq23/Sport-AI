@@ -1,0 +1,133 @@
+{
+  "source_image": "court_plate.png",
+  "source_resolution": [
+    1920,
+    1080
+  ],
+  "pixel_frame": "video",
+  "num_points": 13,
+  "created_utc": "2026-08-16T17:21:04+00:00",
+  "note": "coordinates are original-image pixels; points constructed by extending lines may fall outside [0,W)x[0,H) and that is valid",
+  "points": [
+    {
+      "id": 1,
+      "name": "paint_base_left",
+      "x": 422.53,
+      "y": 1054.27,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 2,
+      "name": "paint_base_right",
+      "x": 1520.67,
+      "y": 1050.4,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 3,
+      "name": "three_base_left",
+      "x": null,
+      "y": null,
+      "labeled": false,
+      "outside_frame": true,
+      "misidentified_note": "constructed intersection landed at X=-0.23 m (want 0.90) — guide line was off",
+      "x_original_click": -602.13,
+      "y_original_click": 1065.87
+    },
+    {
+      "id": 4,
+      "name": "three_base_right",
+      "x": 2560.8,
+      "y": 1062.0,
+      "labeled": true,
+      "outside_frame": true
+    },
+    {
+      "id": 5,
+      "name": "three_break_left",
+      "x": null,
+      "y": null,
+      "labeled": false,
+      "outside_frame": false,
+      "misidentified_note": "clicked at image row 822 -> court Y 5.2 m; the 3pt break is at Y 2.99 (row 883)",
+      "x_original_click": 244.67,
+      "y_original_click": 822.27
+    },
+    {
+      "id": 6,
+      "name": "three_break_right",
+      "x": null,
+      "y": null,
+      "labeled": false,
+      "outside_frame": false,
+      "misidentified_note": "clicked at image row 815 -> court Y 4.5 m; same as #5",
+      "x_original_click": 1683.07,
+      "y_original_click": 814.53
+    },
+    {
+      "id": 7,
+      "name": "paint_ft_left",
+      "x": 666.13,
+      "y": 799.07,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 8,
+      "name": "paint_ft_right",
+      "x": 1265.47,
+      "y": 802.93,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 9,
+      "name": "ft_circle_far",
+      "x": 967.73,
+      "y": 752.67,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 10,
+      "name": "three_arc_top",
+      "x": 971.6,
+      "y": 733.33,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 11,
+      "name": "centre_circle_near",
+      "x": 971.6,
+      "y": 683.07,
+      "labeled": true,
+      "outside_frame": false
+    },
+    {
+      "id": 12,
+      "name": "halfway_left",
+      "x": null,
+      "y": null,
+      "labeled": false,
+      "outside_frame": false,
+      "misidentified_note": "clicked at image row 602 -> court Y 26.3 m; that is the FAR baseline, the half-way line is at row 664",
+      "x_original_click": 608.13,
+      "y_original_click": 601.87
+    },
+    {
+      "id": 13,
+      "name": "halfway_right",
+      "x": null,
+      "y": null,
+      "labeled": false,
+      "outside_frame": false,
+      "misidentified_note": "clicked at image row 594 -> court Y 23.0 m; same as #12",
+      "x_original_click": 1226.8,
+      "y_original_click": 594.13
+    }
+  ],
+  "cleanup_note": "points 3/5/6/12/13 were clicked on the wrong court feature; their original clicks are kept as x_original_click / y_original_click"
+}

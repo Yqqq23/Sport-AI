@@ -1,0 +1,22 @@
+# trajectory 包自己的依赖。
+#
+# 检测 / 跟踪 / OCR 的重依赖（ultralytics、torch、paddleocr 等）不在这里 ——
+# 那些跟着 basketball-v2 的 requirements.txt 走，别装两份，版本会打架：
+#     pip install -r <basketball-v2>/requirements.txt
+#     pip install -r trajectory/requirements.txt
+
+# ⚠ numpy 必须 pin 在 1.x
+#
+# 本机实测：numpy 2.1 装上之后，用 numpy 1.x 编译的二进制包
+# （pyarrow / numexpr / bottleneck / 部分 psutil 轮子）全部报
+#     AttributeError: _ARRAY_API not found
+# 连 `import pandas` 都会一路报到底，ultralytics 直接起不来。
+# 服务器上先把 numpy 钉住，再装其它东西。
+numpy>=1.24,<2
+
+opencv-python>=4.8
+pandas>=2.0
+
+# 只影响轨迹平滑质量：装了走 Savitzky-Golay（保住急停急转的形状），
+# 没装自动退回滑动平均并打日志。不是硬依赖。
+scipy>=1.10
