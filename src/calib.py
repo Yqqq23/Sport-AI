@@ -37,22 +37,25 @@ def safe_float(v: Any, default: float = 0.0) -> float:
 
 @dataclass
 class CourtCanvasConfig:
-    """Size of the top-down canvas that ``court_points`` are expressed in.
+    """Metric court fitted into a canvas with equal horizontal/vertical scale."""
 
-    IMPORTANT ORIENTATION MISMATCH - see the Phase A report.
-    SRC_A/court_calibration_manual.json declares ``topdown_template_size:
-    [500, 940]`` and its court_points span x<=468, y<=908, i.e. a PORTRAIT
-    500x940 canvas. But SRC_A's ``BasketballHalfCourtConfig`` (line 104-105)
-    and SRC_A/0619/projection.py's ``CourtConfig`` (line 15-16) both default to
-    width=940, height=500, i.e. LANDSCAPE. The two are inconsistent in the
-    source. Defaults here follow the calibration JSON (portrait), because that
-    is the artifact the homography is actually fitted against. Override via
-    config if you re-calibrate against a landscape canvas.
-    """
+    width: int = 1020
+    height: int = 960
+    margin: int = 60
+    court_width_m: float = 15.0
+    court_height_m: float = 14.0
 
-    width: int = 500
-    height: int = 940
-    margin: int = 32
+
+def court_canvas_matrix(config) -> np.ndarray:
+    """Metres -> canvas pixels, baseline below, preserving physical aspect ratio."""
+    w, h = config.court_width_m, config.court_height_m
+    aw, ah = config.width - 2 * config.margin, config.height - 2 * config.margin
+    if w <= 0 or h <= 0 or aw <= 0 or ah <= 0:
+        raise ValueError("Court dimensions and drawable canvas must be positive.")
+    scale = min(aw / w, ah / h)
+    left = (config.width - w * scale) / 2
+    bottom = (config.height + h * scale) / 2
+    return np.array([[scale, 0, left], [0, -scale, bottom], [0, 0, 1]], dtype=np.float64)
 
 
 @dataclass
@@ -62,6 +65,9 @@ class CourtCalibrationData:
     point_names: list[str]
     image_points: np.ndarray
     court_points: np.ndarray
+    homography: Optional[np.ndarray] = None
+    source_resolution: Optional[tuple[int, int]] = None
+    court_size_m: Optional[tuple[float, float]] = None
 
 
 def clip_point_xy(point: tuple[float, float] | list[float], width: int, height: int) -> list[float]:
@@ -115,6 +121,30 @@ def load_court_calibration(path: str | Path | None) -> CourtCalibrationData:
 
     if not isinstance(payload, dict):
         raise ValueError("Calibration JSON root must be an object.")
+
+    if "homography" in payload:
+        # The reference calibration is already line-refined. Re-fitting its
+        # original clicks would discard that refinement and reintroduce outliers.
+        matrix = np.asarray(payload["homography"], dtype=np.float64)
+        if matrix.shape != (3, 3) or not np.isfinite(matrix).all() or np.linalg.matrix_rank(matrix) != 3:
+            raise ValueError("Calibration homography must be a finite, invertible 3x3 matrix.")
+        if payload.get("pixel_frame") != "video" or payload.get("horizon_crosses_court"):
+            raise ValueError("Metric calibration must use video pixels and not cross the court horizon.")
+        court = payload["court"]
+        if court.get("units") != "metres":
+            raise ValueError("Metric calibration must use metres.")
+        resolution = tuple(payload["source_resolution"])
+        if len(resolution) != 2 or any(not isinstance(v, int) or v <= 0 for v in resolution):
+            raise ValueError("source_resolution must be [width, height] in positive pixels.")
+        size = (float(court["width_mm"]) / 1000, float(court["length_mm"]) / 1000)
+        if not np.isfinite(size).all() or min(size) <= 0:
+            raise ValueError("Metric court dimensions must be finite and positive.")
+        return CourtCalibrationData(
+            point_names=[str(p) for p in payload.get("point_ids_used", [])],
+            image_points=np.empty((0, 2), dtype=np.float32),
+            court_points=np.empty((0, 2), dtype=np.float32),
+            homography=matrix, source_resolution=resolution, court_size_m=size,
+        )
 
     image_points_map = _validate_named_points(payload.get("image_points"), "image_points")
     court_points_map = _validate_named_points(payload.get("court_points"), "court_points")
@@ -184,6 +214,14 @@ class ViewTransformer:
             raise RuntimeError("cv2.perspectiveTransform returned None.")
         return transformed.reshape(-1, 2)
 
+    @classmethod
+    def from_matrix(cls, matrix: np.ndarray) -> "ViewTransformer":
+        transformer = cls.__new__(cls)
+        transformer.homography = np.asarray(matrix, dtype=np.float64)
+        transformer.source = transformer.target = np.empty((0, 2), dtype=np.float32)
+        transformer.inlier_mask = None
+        return transformer
+
 
 def bbox_ground_point(bbox_xyxy: list[float]) -> tuple[float, float]:
     """Foot position of a detection: midpoint of the box BOTTOM edge.
@@ -215,7 +253,22 @@ class CourtProjector:
     ) -> None:
         self.calibration = calibration
         self.canvas = canvas or CourtCanvasConfig()
-        self.transformer = ViewTransformer(calibration.image_points, calibration.court_points)
+        if calibration.homography is not None:
+            if calibration.court_size_m != (self.canvas.court_width_m, self.canvas.court_height_m):
+                raise ValueError("Calibration court dimensions disagree with canvas court dimensions.")
+            self.transformer = ViewTransformer.from_matrix(
+                court_canvas_matrix(self.canvas) @ calibration.homography
+            )
+        else:
+            self.transformer = ViewTransformer(calibration.image_points, calibration.court_points)
+
+    def check_frame(self, width: int, height: int) -> None:
+        expected = self.calibration.source_resolution
+        if expected is not None and expected != (width, height):
+            raise ValueError(
+                f"Calibration expects {expected[0]}x{expected[1]} video, got {width}x{height}. "
+                "Use the original video geometry or recalibrate."
+            )
 
     @classmethod
     def from_json(
@@ -232,9 +285,9 @@ class CourtProjector:
     def project_point(self, x: float, y: float) -> tuple[float, float]:
         """Project one image-space point to court-canvas space.
 
-        The result is clipped to the canvas, matching the source's
-        ``project_ground_point_to_court`` (lines 1211-1238), which returned
-        ``clip_point_xy(...)``.
+        Metric calibrations preserve out-of-bounds positions; rendering omits
+        points outside the canvas. Legacy canvas-pixel calibrations retain
+        their historical clipping behaviour.
         """
         projected = self.transformer.transform_points(
             np.asarray([[float(x), float(y)]], dtype=np.float32)
@@ -245,8 +298,11 @@ class CourtProjector:
         py = safe_float(projected[0, 1], float("nan"))
         if not np.isfinite(px) or not np.isfinite(py):
             raise ValueError(f"Projection produced a non-finite point for input ({x}, {y}).")
-        clipped = clip_point_xy((px, py), self.canvas.width, self.canvas.height)
-        return clipped[0], clipped[1]
+        if self.calibration.homography is None:
+            clipped = clip_point_xy((px, py), self.canvas.width, self.canvas.height)
+            return clipped[0], clipped[1]
+        # Do not pile out-of-court detections onto the image border.
+        return px, py
 
     def project_bbox_ground_point(self, bbox_xyxy: list[float]) -> tuple[float, float]:
         """Project a detection box to the court using its bottom-edge midpoint."""

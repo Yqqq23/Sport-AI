@@ -878,7 +878,7 @@ class PerDigitJerseyClassifier:
 
         LOGGER.info(
             "Per-digit jersey classifier ready: %s on %s (stage=%s, selection_metric=%s)",
-            weights.name,
+            weights.resolve(),
             self._device,
             meta.get("stage"),
             (meta.get("metrics") or {}).get("selection_metric_mean_per_digit_macro_f1"),

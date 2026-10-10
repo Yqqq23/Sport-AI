@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Court Vision · 篮球轨迹分析</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header><a href="/" class="brand">◉ COURT VISION</a><span>篮球视频分析工作台</span></header>
+  <main>
+    <section class="intro"><span class="eyebrow">FROM GAME FOOTAGE TO PLAYER MOVEMENT</span><h1>每一步跑动，都清晰可见。</h1><p>上传比赛视频，查看全场俯视轨迹，并聚焦你关心的球衣号码。</p></section>
+    <section class="panel upload-panel">
+      <div><h2><b>01</b> 上传比赛视频</h2><p id="limits">默认处理前 1800 帧 · Per-digit 球衣识别</p></div>
+      <form id="upload-form"><label class="file-picker" for="video-file">选择视频<input id="video-file" type="file" accept=".mp4,.mov,.avi,.mkv,.webm,.m4v" required></label><button id="upload-button" type="submit">开始分析 ↗</button></form>
+      <p class="note">俯视路线使用服务器的球场标定。不同机位的视频需要先更新标定。</p>
+    </section>
+    <section id="task-panel" class="panel" hidden>
+      <div class="section-heading"><h2><b>02</b> 分析进度</h2><a id="log-link" target="_blank" rel="noopener">查看运行日志 ↗</a></div>
+      <div class="status-row"><strong id="task-name"></strong><span id="task-status" role="status"></span></div>
+      <progress id="progress" value="0" max="100"></progress><p id="task-detail" class="note"></p>
+    </section>
+    <p id="error" class="error" role="alert" hidden></p>
+    <section id="results" hidden>
+      <div class="section-heading"><h2><b>03</b> 比赛视角</h2><span class="tag">ANALYSIS COMPLETE</span></div>
+      <div class="video-grid">
+        <article class="panel"><h3>俯视全场 <small>TOPDOWN</small></h3><video id="topdown" controls playsinline preload="metadata"></video><p>球场映射、球员位置与近期运动轨迹</p><a id="topdown-download" download>下载视频 ↓</a></article>
+        <article class="panel"><h3>比赛标注 <small>ANNOTATED</small></h3><video id="annotated" controls playsinline preload="metadata"></video><p>原始视角中的检测框与识别号码</p><a id="annotated-download" download>下载视频 ↓</a></article>
+      </div>
+      <section class="panel focus-panel">
+        <h2><b>04</b> 选择球衣号码</h2><p>选择已识别号码，生成高亮画面与累计俯视路线。相同号码的不同轨迹会同时显示。</p>
+        <form id="player-form"><label for="player-select">球衣号码</label><select id="player-select"></select><button id="player-button" type="submit">生成球员视频 ↗</button></form>
+        <p id="player-status" role="status"></p><p class="note">仅显示号码已识别的帧；遮挡、失踪或轨迹中断处不连接路线。未识别阶段不会猜测归属。</p>
+        <div id="selected-result" hidden><h3 id="selected-title">球员专属视角</h3><video id="selected" controls playsinline preload="metadata"></video><a id="selected-download" download>下载球员视频 ↓</a></div>
+      </section>
+    </section>
+  </main><footer>COURT VISION / Basketball v2 · 固定机位运动分析</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

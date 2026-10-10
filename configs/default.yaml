@@ -131,19 +131,30 @@ identity:
   max_players: 6
 
 # --- Court calibration ---------------------------------------------------
+motion:
+  enabled: true
+  # Kalman + Hungarian in court metres. Starting values; tune on actual footage.
+  measurement_std_m: 0.25
+  acceleration_std_mps2: 5.0
+  max_speed_mps: 10.0
+  position_slack_m: 0.6
+  mahalanobis_gate: 9.21
+  max_lost_sec: 1.0
+  predict_sec: 0.25
+  court_margin_m: 2.0
+
 # Homography is solved ONCE outside the frame loop; the 0619 footage is a fixed
 # PlaySight camera, so per-frame re-estimation would only add cost and jitter.
-calibration_json: court_calibration.json
+calibration_json: court_calibration_refined.json
 
-# Top-down canvas that court_points are expressed in.
-# PORTRAIT 500x940 on purpose: the calibration JSON's court_points span x<=468,
-# y<=908. The homography is fitted to those points, so the drawn court must use
-# the same coordinate space. Changing this to landscape REQUIRES re-clicking the
-# calibration points; changing the numbers alone will silently misplace players.
+# Refined reference uses a 15x14 m FIBA half court, not a dedicated 15x11 m
+# 3x3 court. Equal X/Y scale: 60 pixels per metre, baseline at the bottom.
 canvas:
-  width: 500
-  height: 940
-  margin: 32
+  width: 1020
+  height: 960
+  margin: 60
+  court_width_m: 15.0
+  court_height_m: 14.0
 
 # --- Outputs -------------------------------------------------------------
 output:
@@ -153,6 +164,7 @@ output:
   shots_stem: shots                       # output 3 -> shots.csv + shots.json
   write_annotated: true
   write_topdown: true
+  write_player_topdowns: true  # players/motion_*.mp4 + trajectory PNG + index.json
   fourcc: mp4v          # mp4v works in stock OpenCV; avc1 usually needs a custom build
 
 max_frames: null        # null = whole video; set an int for quick tests
@@ -254,10 +266,11 @@ jersey:
   use_gpu: true
   tesseract_cmd: null   # null = find on PATH
 
-  # Stop calling OCR on a track once its number has locked. Leave this on:
-  # further calls can only re-confirm what is already known, and with a network
-  # backend each one costs seconds. Turn off only to measure raw OCR accuracy.
-  skip_locked_tracks: true
+  # Setting this true saves OCR calls but prevents later correction of an
+  # initially wrong locked number. Local per-digit inference can keep voting.
+  # Keep gathering evidence so an initially wrong number can be corrected.
+  # Motion IDs and trajectories never depend on this label.
+  skip_locked_tracks: false
   # Hard ceiling on OCR calls per run; 0 = unlimited. A safety net for metered
   # backends so a misconfigured overnight run cannot rack up a bill.
   max_ocr_calls: 0
@@ -477,11 +490,11 @@ render:
     # Structural. Keep width/height identical to `canvas` above or projected
     # points land in a different space than the drawn court; config.validate()
     # checks this and refuses to run on a mismatch.
-    width: 500
-    height: 940
-    margin: 32
+    width: 1020
+    height: 960
+    margin: 60
     court_width_m: 15.0
-    court_height_m: 11.0
+    court_height_m: 14.0
     line_thickness: 2
     player_radius: 7
     trail_thickness: 2

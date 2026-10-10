@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional, TypeVar, get_type_hints
 
 from calib import CourtCanvasConfig
+from motion import MotionConfig
 from detect import DetectorConfig
 from identity import IdentityConfig
 from jersey import (
@@ -59,6 +60,7 @@ class OutputConfig:
     shots_stem: str = "shots"
     write_annotated: bool = True
     write_topdown: bool = True
+    write_player_topdowns: bool = True
     #: mp4v is available in stock OpenCV builds. avc1/H.264 usually is not
     #: unless OpenCV was built against libx264.
     fourcc: str = "mp4v"
@@ -142,6 +144,7 @@ class AppConfig:
     shot: ShotConfig = field(default_factory=ShotConfig)
     jersey: JerseyPipelineConfig = field(default_factory=JerseyPipelineConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
+    motion: MotionConfig = field(default_factory=MotionConfig)
     render: RenderPipelineConfig = field(default_factory=RenderPipelineConfig)
     canvas: CourtCanvasConfig = field(default_factory=CourtCanvasConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -163,6 +166,9 @@ class AppConfig:
                 "Projected points would land in a different coordinate space than the "
                 "drawn court."
             )
+        for name in ("margin", "court_width_m", "court_height_m"):
+            if getattr(self.canvas, name) != getattr(self.render.court, name):
+                problems.append(f"canvas.{name} and render.court.{name} disagree.")
         return problems
 
 
@@ -253,6 +259,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         shot=_build(ShotConfig, raw.get("shot"), base_dir),
         jersey=_build(JerseyPipelineConfig, raw.get("jersey"), base_dir),
         identity=_build(IdentityConfig, raw.get("identity"), base_dir),
+        motion=_build(MotionConfig, raw.get("motion"), base_dir),
         render=_build(RenderPipelineConfig, raw.get("render"), base_dir),
         canvas=_build(CourtCanvasConfig, raw.get("canvas"), base_dir),
         output=_build(OutputConfig, raw.get("output"), base_dir),

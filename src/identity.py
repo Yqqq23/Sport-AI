@@ -1,5 +1,9 @@
 """Player identity: turn tracker ids into jersey numbers and bounded slots.
 
+The metric pipeline uses ``resolve_motion``: immutable motion keys with mutable
+OCR labels, and no merging by number. The number-merging behaviour described
+below belongs to the legacy ``resolve`` / image-space fallback path only.
+
 WHY THIS MODULE EXISTS
 ----------------------
 A tracker id is not a player. ByteTrack/BoT-SORT hand out 1, 2, 3, ... in the
@@ -455,6 +459,27 @@ class PlayerIdentityRegistry:
         return identity
 
     # -- reporting -------------------------------------------------------
+    def resolve_motion(self, track_id: int, slot: int, number: Optional[str],
+                       frame_idx: int) -> Identity:
+        """Motion owns identity; OCR updates only its label, never merges paths.
+
+        A new motion ID starts fresh even if its display slot or number was
+        previously used. Callers must pass only temporally confirmed numbers.
+        """
+        key = f"motion:{track_id}"
+        identity = self._identities.get(key)
+        if identity is None:
+            identity = Identity(key=key, slot=slot, track_ids={track_id})
+            self._identities[key] = identity
+        identity.last_seen_frame = frame_idx
+        identity.number = number
+        if number is not None and number not in self._number_order:
+            self._number_order.append(number)
+        return identity
+
+    def forget_motion(self, track_id: int) -> None:
+        self._identities.pop(f"motion:{track_id}", None)
+
     def confirmed_numbers(self) -> list[str]:
         """Jersey numbers recognized so far, in first-seen order."""
         return list(self._number_order)

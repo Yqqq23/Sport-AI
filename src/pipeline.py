@@ -15,11 +15,12 @@ what runs on which frame and in what order, and owns nothing else.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -27,8 +28,11 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cv2
+import numpy as np
 
-from calib import CourtProjector, load_court_calibration
+from calib import CourtProjector, court_canvas_matrix, load_court_calibration
+from motion import CourtMotionTracker
+from player_trajectories import PlayerTrajectoryExporter
 from config import AppConfig, load_config
 from identity import Identity, PlayerIdentityRegistry, SlotTracker
 from jersey import (
@@ -116,7 +120,7 @@ def build_projector(config: AppConfig) -> Optional[CourtProjector]:
     calibration = load_court_calibration(config.calibration_json)
     projector = CourtProjector(calibration, canvas=config.canvas)
     LOGGER.info(
-        "Homography solved once from %s calibration point(s): %s",
+        "Calibration loaded (%s reference points): %s",
         len(calibration.point_names),
         config.calibration_json,
     )
@@ -127,6 +131,7 @@ def run_pipeline(
     input_video: Path,
     config: AppConfig,
     tracker_override: Optional[str] = None,
+    export_trajectories: bool = False,
 ) -> dict[str, Path]:
     """Process one video and write all three outputs."""
     input_video = Path(input_video)
@@ -159,14 +164,29 @@ def run_pipeline(
     )
 
     projector = build_projector(config)
+    if projector is not None:
+        try:
+            projector.check_frame(width, height)
+        except ValueError:
+            capture.release()
+            raise
     tracker = Tracker(weights=config.detector.weights, config=config.tracker)
     stabilizer = JerseyNumberStabilizer(config.jersey.stabilizer)
     identities = PlayerIdentityRegistry(max_players=config.identity.max_players)
-    # Slots are assigned HERE, by position, instead of trusting the MOT backend
-    # to produce track ids. It was returning none at all, which both erased the
-    # on-screen ids and - since jersey ownership needs an owner id - discarded
-    # every jersey crop before OCR could see it.
+    # Court motion IDs own OCR and trajectories. Image-space slots are retained
+    # only as a fallback when metric calibration is unavailable or disabled.
     slot_tracker = SlotTracker(max_players=config.identity.max_players)
+    motion_tracker = None
+    metric_to_canvas = court_canvas_matrix(config.canvas)
+    if config.motion.enabled:
+        if projector is not None and projector.calibration.homography is not None:
+            motion_tracker = CourtMotionTracker(
+                config.motion, config.identity.max_players,
+                (config.canvas.court_width_m, config.canvas.court_height_m),
+            )
+            LOGGER.info("Court motion tracking: Kalman + gated Hungarian; OCR labels do not merge tracks")
+        else:
+            LOGGER.warning("Metric calibration unavailable; using legacy image-space slot tracking")
     ocr = make_ocr_backend(
         config.jersey.backend,
         use_gpu=config.jersey.use_gpu,
@@ -196,7 +216,8 @@ def run_pipeline(
     court_config: CourtRenderConfig = config.render.court
     court_template = draw_half_court_template(court_config)
     trails = TrailHistory(
-        trail_length=court_config.trail_length, alpha=config.render.trail_alpha
+        trail_length=court_config.trail_length,
+        alpha=1.0 if motion_tracker is not None else config.render.trail_alpha,
     )
     ball_trail = make_ball_trail(court_config.trail_length)
 
@@ -215,6 +236,15 @@ def run_pipeline(
         if config.output.write_topdown
         else None
     )
+
+    player_exporter = None
+    if config.output.write_player_topdowns:
+        if motion_tracker is not None:
+            player_exporter = PlayerTrajectoryExporter(
+                output_dir / "players", court_template, court_config, fps, fourcc, _open_video_writer
+            )
+        else:
+            LOGGER.warning("Per-player trajectory videos require enabled metric motion tracking")
 
     frame_idx = 0
     ocr_calls = 0
@@ -239,6 +269,17 @@ def run_pipeline(
     }
     started = time.perf_counter()
 
+    trajectory_file = None
+    if export_trajectories:
+        if not cv2.imwrite(str(output_dir / "court_template.png"), court_template):
+            raise RuntimeError("Cannot save court template")
+        trajectory_file = (output_dir / "trajectories.jsonl").open("w", encoding="utf-8")
+        (output_dir / "trajectory_meta.json").write_text(json.dumps({
+            "fps": fps, "width": width, "height": height,
+            "calibrated": projector is not None,
+            "annotated": annotated_path.name, "topdown": topdown_path.name,
+        }), encoding="utf-8")
+
     try:
         while True:
             ok, frame = capture.read()
@@ -259,12 +300,25 @@ def run_pipeline(
             jersey_boxes_seen += len(tracked.jerseys)
             untracked_players += sum(1 for p in tracked.players if p.track_id is None)
 
-            # Position-based slot per player box, independent of track_id.
-            # `player_slot` is the key used by the stabilizer, the identity
-            # registry and the trails from here on.
-            player_slots = slot_tracker.assign(
-                [p.bbox_xyxy for p in tracked.players], frame_idx
-            )
+            # The mapping holds monotonic motion IDs in metric mode, or legacy
+            # slot IDs otherwise. Detector/MOT IDs never override this mapping.
+            if motion_tracker is not None:
+                feet = np.asarray([p.ground_xy for p in tracked.players], dtype=float).reshape(-1, 2)
+                if len(feet):
+                    homogeneous = np.c_[feet, np.ones(len(feet))] @ projector.calibration.homography.T
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        positions = homogeneous[:, :2] / homogeneous[:, 2:3]
+                else:
+                    positions = np.empty((0, 2))
+                player_slots = motion_tracker.update(positions, timestamp_sec)
+                for expired in motion_tracker.expired_ids:
+                    stabilizer.states.pop(expired, None)
+                    identities.forget_motion(expired)
+                    trails.discard(f"motion:{expired}")
+            else:
+                player_slots = slot_tracker.assign(
+                    [p.bbox_xyxy for p in tracked.players], frame_idx
+                )
             slot_of_player = {id(p): s for p, s in zip(tracked.players, player_slots)}
 
             if run_ocr_this_frame:
@@ -362,7 +416,8 @@ def run_pipeline(
             )
             ball_center = tracked.ball.center_xy if tracked.ball is not None else None
             player_boxes = [
-                make_player_box(p.track_id, p.bbox_xyxy, p.ground_xy) for p in tracked.players
+                make_player_box(slot_of_player.get(id(p)) or None, p.bbox_xyxy, p.ground_xy)
+                for p in tracked.players
             ]
             event = shot_analyzer.update(
                 frame_idx=frame_idx,
@@ -377,11 +432,17 @@ def run_pipeline(
                     # directly: the registry is sticky, so a shot taken on a
                     # frame where OCR happened not to run is still credited to
                     # the number that track is already known to wear.
-                    event.shooter_jersey_number = identities.resolve(
-                        event.shooter_track_id,
-                        stabilizer.get_stable_number(event.shooter_track_id),
-                        frame_idx=frame_idx,
-                    ).number
+                    if motion_tracker is not None:
+                        event.shooter_jersey_number = (
+                            stabilizer.get_stable_number(event.shooter_track_id)
+                            if stabilizer.is_locked(event.shooter_track_id) else None
+                        )
+                    else:
+                        event.shooter_jersey_number = identities.resolve(
+                            event.shooter_track_id,
+                            stabilizer.get_stable_number(event.shooter_track_id),
+                            frame_idx=frame_idx,
+                        ).number
                 if projector is not None and event.shot_position_xy is not None:
                     event.court_xy = projector.project_point(*event.shot_position_xy)
                 recorder.add_event(event)
@@ -395,33 +456,68 @@ def run_pipeline(
                 frame_idx=frame_idx,
                 timestamp_sec=timestamp_sec,
                 slot_of_player=slot_of_player,
+                motion_tracker=motion_tracker,
             )
+            if trajectory_file is not None:
+                trajectory_file.write(json.dumps({
+                    "frame": frame_idx,
+                    "players": [{
+                        "key": str(p.render_key), "number": p.jersey_number,
+                        "bbox": [float(v) for v in p.bbox_xyxy],
+                        "court": [float(v) for v in p.court_xy]
+                        if p.court_xy is not None and np.isfinite(p.court_xy).all() else None,
+                    } for p in render_data.players],
+                }, allow_nan=False) + "\n")
             if writer_annotated is not None:
                 writer_annotated.write(
                     render_annotated_frame(
                         frame, render_data, line_width=config.render.line_width
                     )
                 )
-            if writer_topdown is not None:
-                writer_topdown.write(
-                    render_topdown_frame(
-                        court_template=court_template,
-                        data=render_data,
-                        trails=trails,
-                        config=court_config,
-                        ball_trail=ball_trail,
+            if writer_topdown is not None or player_exporter is not None:
+                topdown_data = render_data
+                if motion_tracker is not None:
+                    predictions = []
+                    for state in motion_tracker.predictions():
+                        number = (stabilizer.get_stable_number(state.track_id)
+                                  if stabilizer.is_locked(state.track_id) else None)
+                        identity = identities.resolve_motion(state.track_id, state.slot, number, frame_idx)
+                        point = metric_to_canvas @ [*state.xy, 1]
+                        predictions.append(PlayerRender(
+                            track_id=state.track_id, bbox_xyxy=[], court_xy=tuple(point[:2]),
+                            identity=identity, predicted=True,
+                        ))
+                    topdown_data = replace(render_data, players=render_data.players + predictions)
+                    # Stop connecting old tails after the short prediction window.
+                    for state in motion_tracker.tracks.values():
+                        if timestamp_sec - state.last_observed > config.motion.predict_sec:
+                            trails.discard(f"motion:{state.track_id}")
+                if player_exporter is not None:
+                    player_exporter.update(topdown_data, {f"motion:{k}" for k in motion_tracker.tracks})
+                if writer_topdown is not None:
+                    writer_topdown.write(
+                        render_topdown_frame(
+                            court_template=court_template,
+                            data=topdown_data,
+                            trails=trails,
+                            config=court_config,
+                            ball_trail=ball_trail,
+                        )
                     )
-                )
 
             if frame_idx % 100 == 0:
                 LOGGER.info("frame %s", frame_idx)
             frame_idx += 1
     finally:
         capture.release()
+        if trajectory_file is not None:
+            trajectory_file.close()
         if writer_annotated is not None:
             writer_annotated.release()
         if writer_topdown is not None:
             writer_topdown.release()
+        if player_exporter is not None:
+            player_exporter.close()
 
     elapsed = time.perf_counter() - started
     video_seconds = frame_idx / max(fps, 1e-6)
@@ -436,6 +532,7 @@ def run_pipeline(
                 "fps": round(fps, 3),
                 "tracker": tracker.backend_name,
                 "reid_active": tracker.reid_active,
+                "motion_tracking": "kalman_hungarian" if motion_tracker is not None else "legacy_slots",
                 "weights": Path(config.detector.weights).name,
                 "elapsed_sec": round(elapsed, 2),
                 "realtime_ratio": round(elapsed / video_seconds, 3) if video_seconds > 0 else None,
@@ -456,6 +553,7 @@ def run_pipeline(
 
     print(recorder.format_summary())
     print(f"  tracker            {tracker.backend_name} (reid={tracker.reid_active})")
+    print(f"  motion tracking    {'kalman_hungarian (OCR-independent)' if motion_tracker is not None else 'legacy_slots'}")
     print(f"  frames processed   {frame_idx}")
     print(
         f"  elapsed            {elapsed:.1f}s for {video_seconds:.1f}s of video "
@@ -561,6 +659,8 @@ def run_pipeline(
     print()
 
     outputs = {"shots_csv": csv_path, "shots_json": json_path}
+    if player_exporter is not None:
+        outputs["player_trajectories"] = player_exporter.directory
     if writer_annotated is not None:
         outputs["annotated"] = annotated_path
     if writer_topdown is not None:
@@ -618,7 +718,8 @@ def _dump_crop(directory: Path, crop, frame_idx: int, track_id: int, text, confi
 
 
 def _build_render_data(
-    tracked, stabilizer, identities, projector, frame_idx, timestamp_sec, slot_of_player
+    tracked, stabilizer, identities, projector, frame_idx, timestamp_sec, slot_of_player,
+    motion_tracker=None,
 ) -> FrameRenderData:
     players: list[PlayerRender] = []
     # NO DUPLICATE SLOT IN ONE FRAME. SlotTracker already assigns each box a
@@ -642,7 +743,19 @@ def _build_render_data(
         # frame_idx is REQUIRED for the roster cap: slot recycling picks the
         # least-recently-seen identity, so without an advancing frame counter
         # every slot looks equally fresh and nothing is ever recycled.
-        identity = identities.resolve(slot if slot else None, number, frame_idx=frame_idx)
+        if motion_tracker is not None:
+            state = motion_tracker.tracks.get(slot)
+            if state is None:
+                # Keep the original detection visible, but no unassociated dot.
+                court_xy = None
+                identity = Identity(key=f"unassigned:{id(player)}", slot=0)
+            else:
+                number = number if stabilizer.is_locked(slot) else None
+                identity = identities.resolve_motion(slot, state.slot, number, frame_idx)
+                point = court_canvas_matrix(projector.canvas) @ [*state.xy, 1]
+                court_xy = tuple(point[:2])
+        else:
+            identity = identities.resolve(slot if slot else None, number, frame_idx=frame_idx)
         if identity.key in claimed_identities or (
             identity.slot > 0 and identity.slot in claimed_slots
         ):
@@ -709,11 +822,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override tracker.tracker, e.g. botsort.yaml or configs/trackers/bytetrack_sportcv.yaml",
     )
     parser.add_argument("--max-frames", type=int, default=None, help="Stop after N frames")
+    parser.add_argument("--export-trajectories", action="store_true", help="Save per-frame tracks for the web application")
     parser.add_argument(
         "--jersey-backend",
         default=None,
         choices=[
-            "auto", "parseq", "local", "roboflow",
+            "auto", "perdigit", "parseq", "local", "roboflow",
             "paddleocr", "easyocr", "pytesseract",
         ],
         help="Override jersey.backend for this run",
@@ -777,7 +891,8 @@ def main() -> None:
     if args.dump_jersey_crops is not None:
         config.jersey.debug_crop_dir = args.dump_jersey_crops
 
-    run_pipeline(input_video=args.input, config=config, tracker_override=args.tracker)
+    run_pipeline(input_video=args.input, config=config, tracker_override=args.tracker,
+                 export_trajectories=args.export_trajectories)
 
 
 if __name__ == "__main__":

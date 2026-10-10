@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 
 from identity import Identity, identity_color
+from calib import court_canvas_matrix
 
 
 # --------------------------------------------------------------------------
@@ -52,6 +53,7 @@ class PlayerRender:
     #: both the label and the colour, and it - not ``track_id`` - is what the
     #: top-down trail is keyed on, so a trail survives a tracker id switch.
     identity: Optional[Identity] = None
+    predicted: bool = False
 
     @property
     def render_key(self) -> Any:
@@ -62,7 +64,9 @@ class PlayerRender:
     def label(self) -> str:
         """Jersey number when known, else the raw tracker id."""
         if self.identity is not None:
-            return self.identity.label
+            if self.identity.slot == 0:
+                return "id:?"
+            return self.identity.label + (" ~" if self.predicted else "")
         return f"#{self.jersey_number}" if self.jersey_number else f"id:{self.track_id}"
 
     def color(self) -> tuple[int, int, int]:
@@ -133,18 +137,15 @@ class CourtRenderConfig:
 
     Colours/thicknesses salvaged from SRC_A/0619/projection.py:13-27.
 
-    NOTE the orientation caveat documented in calib.CourtCanvasConfig: the
-    source defaulted to 940x500 (landscape) while the shipped calibration JSON
-    targets 500x940 (portrait). Defaults here follow the calibration JSON so
-    the drawn template and the projected points share one coordinate space.
-    Keep width/height in sync with calib.CourtCanvasConfig.
+    Geometry matches the refined 15x14 m reference half court at 60 px/m.
+    Keep geometry in sync with calib.CourtCanvasConfig.
     """
 
-    width: int = 500
-    height: int = 940
-    margin: int = 32
+    width: int = 1020
+    height: int = 960
+    margin: int = 60
     court_width_m: float = 15.0
-    court_height_m: float = 11.0
+    court_height_m: float = 14.0
     court_color: tuple[int, int, int] = (170, 205, 232)
     paint_color: tuple[int, int, int] = (156, 194, 224)
     line_color: tuple[int, int, int] = (220, 120, 30)
@@ -157,14 +158,9 @@ class CourtRenderConfig:
 
 
 def court_to_pixel(x_m: float, y_m: float, config: CourtRenderConfig) -> list[float]:
-    """Salvaged verbatim from SRC_A/0619/projection.py:29-36."""
-    drawable_width = max(1.0, float(config.width - 2 * config.margin))
-    drawable_height = max(1.0, float(config.height - 2 * config.margin))
-    left = float(config.margin)
-    bottom = float(config.height - config.margin)
-    pixel_x = left + (float(x_m) / config.court_width_m) * drawable_width
-    pixel_y = bottom - (float(y_m) / config.court_height_m) * drawable_height
-    return [float(pixel_x), float(pixel_y)]
+    """Use the same equal-scale metric transform as the player projector."""
+    point = court_canvas_matrix(config) @ [float(x_m), float(y_m), 1.0]
+    return point[:2].tolist()
 
 
 def _arc_polyline_meters(
@@ -201,7 +197,7 @@ def draw_half_court_template(config: CourtRenderConfig) -> np.ndarray:
     canvas[:] = (court_base * (1.0 - gradient) + court_top * gradient).astype(np.uint8)
 
     left, bottom = court_to_pixel(0.0, 0.0, config)
-    right, top = court_to_pixel(15.0, 11.0, config)
+    right, top = court_to_pixel(config.court_width_m, config.court_height_m, config)
     hoop_x_m = 7.5
     hoop_y_m = 1.575
     free_throw_y_m = 5.80
@@ -307,9 +303,16 @@ def draw_half_court_template(config: CourtRenderConfig) -> np.ndarray:
         cv2.LINE_AA,
     )
 
+    if config.court_height_m == 14.0:
+        cv2.polylines(
+            canvas,
+            [_arc_polyline_meters(hoop_x_m, 14.0, 1.8, 180.0, 360.0, config)],
+            False, config.line_color, config.line_thickness, cv2.LINE_AA,
+        )
+
     cv2.putText(
         canvas,
-        "3x3 HALF COURT",
+        f"HALF COURT {config.court_width_m:g} x {config.court_height_m:g} m",
         (int(round(left + 8)), int(round(top + 28))),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
@@ -386,6 +389,10 @@ class TrailHistory:
 
     def get(self, track_id: Any) -> list[tuple[float, float]]:
         return list(self.track_history_2d.get(track_id, ()))
+
+    def discard(self, track_id: Any) -> None:
+        self.smoothed_points.pop(track_id, None)
+        self.track_history_2d.pop(track_id, None)
 
 
 # --------------------------------------------------------------------------
@@ -551,9 +558,16 @@ def render_topdown_frame(
     # blended in, so the blend cannot wash them out.
     markers: list[tuple[int, int, tuple[int, int, int], str]] = []
 
+    def visible(point) -> bool:
+        return (
+            point is not None and np.isfinite(point).all()
+            and 0 <= point[0] < config.width and 0 <= point[1] < config.height
+        )
+
     for player in data.players:
         point = player.court_xy
-        if point is None:
+        if not visible(point):
+            trails.discard(player.render_key)
             continue
         key = player.render_key
         smoothed = trails.update(key, point)
@@ -606,7 +620,7 @@ def render_topdown_frame(
             scene, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (16, 16, 16), 1, cv2.LINE_AA
         )
 
-    if data.ball is not None and data.ball.court_xy is not None:
+    if data.ball is not None and visible(data.ball.court_xy):
         # NO BALL TRAIL. It was removed on purpose: the ball's projected path is
         # the least trustworthy thing on this canvas. The homography is fitted
         # to points ON THE FLOOR, and a ball in flight is metres above it, so

@@ -1,0 +1,15 @@
+{
+  "provenance": "Computer Vision/calibration/court_3x3.json; refined 2026-08-16T17:34:31+00:00. Matrix copied without re-fitting clicks.",
+  "source_video": "3 v 3 Basketball Game Side A 24022026.mp4",
+  "court": {"standard": "FIBA half court", "width_mm": 15000, "length_mm": 14000, "units": "metres"},
+  "source_resolution": [1920, 1080],
+  "pixel_frame": "video",
+  "horizon_crosses_court": false,
+  "homography": [
+    [-0.006024178215611192, -0.015290427070004255, 12.915724924135022],
+    [0.000051037409108366026, 0.014861539692294796, -15.706884067045799],
+    [-0.00009021115544487218, -0.001995888108896336, 1.0]
+  ],
+  "point_ids_used": [1, 2, 4, 7, 8, 9, 10, 11],
+  "refined": {"method": "ICP against every painted court line (nearest-line distance)", "line_pixels_used": 11219, "median_dev_m": 0.0635, "p90_dev_m": 0.2224}
+}
