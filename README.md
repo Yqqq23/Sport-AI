@@ -1,5 +1,7 @@
 # basketball-v2
 
+**Web 上传与球员轨迹系统：** 参见 [启动和使用说明](docs/webapp.md)。上传比赛视频后查看 topdown、annotated，并按球衣号码生成高亮与轨迹视频。
+
 Near-real-time 2D basketball analysis. One video in, three artifacts out:
 
 | Output | File | Contents |
@@ -15,6 +17,13 @@ API, no SAM2, no pose estimation.
 ---
 
 ## Table of contents
+
+**Side A top-down fix:** the default now uses the line-refined 15 × 14 m
+calibration, with equal X/Y scale and a 1020 × 960 canvas. See
+[calibration and jersey checkpoint notes](docs/topdown_calibration.md).
+
+**Trajectory continuity:** metric Kalman + gated Hungarian tracking now keeps
+motion identities independent of jersey OCR. See [motion tracking](docs/motion_tracking.md).
 
 1. [Server setup, in order](#1-server-setup-in-order)
 2. [Dataset layout](#2-dataset-layout)
@@ -758,3 +767,5 @@ python tests/test_shot_logic.py
   no `Results` object escapes them. `track.py` uses the API directly because
   Ultralytics fuses detection and tracking in `model.track()`; that coupling is
   deliberate and documented.
+#   S p o r t - A I  
+ 
